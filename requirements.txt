@@ -4,3 +4,4 @@ pydantic
 sqlalchemy
 pandas
 playwright
+beautifulsoup4
