@@ -9,7 +9,8 @@ from app.models import Business
 from app.crawl.crawler import crawl_business_site
 
 
-def main() -> None:
+def run_crawl() -> dict[str, int]:
+    """Run the crawl phase for businesses that passed the prefilter."""
     status_order = case(
         (Business.fit_status == "strong", 0),
         (Business.fit_status == "maybe", 1),
@@ -17,6 +18,8 @@ def main() -> None:
     )
 
     with SessionLocal() as session:
+        success_count = 0
+        failure_count = 0
         businesses = (
             session.query(Business)
             .filter(Business.fit_status.in_(["strong", "maybe"]))
@@ -32,10 +35,22 @@ def main() -> None:
             result = crawl_business_site(session, business)
 
             if result["success"]:
+                success_count += 1
                 print(f"  Success | pages fetched: {result['pages_fetched']}")
                 print(f"  Selected pages: {result['pages_selected']}")
             else:
+                failure_count += 1
                 print(f"  Failed | reason: {result['reason']}")
+
+        print(f"\nDone.")
+        print(f"Succeeded: {success_count}")
+        print(f"Failed: {failure_count}")
+
+        return {"success": success_count, "failed": failure_count, "total": len(businesses)}
+
+
+def main() -> None:
+    run_crawl()
 
 
 if __name__ == "__main__":

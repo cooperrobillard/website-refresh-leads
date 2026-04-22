@@ -9,7 +9,8 @@ from app.models import Business
 from app.scoring.rules import passes_basic_filters
 
 
-def main() -> None:
+def run_prefilter() -> Counter[str]:
+    """Run the deterministic prefilter across all saved businesses."""
     with SessionLocal() as session:
         businesses = session.query(Business).all()
         counts: Counter[str] = Counter()
@@ -27,6 +28,12 @@ def main() -> None:
         print(f"Strong: {counts['strong']}")
         print(f"Maybe: {counts['maybe']}")
         print(f"Skip: {counts['skip']}")
+
+        return counts
+
+
+def main() -> None:
+    run_prefilter()
 
 
 if __name__ == "__main__":

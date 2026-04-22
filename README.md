@@ -4,41 +4,117 @@
 
 ## V1 Goal
 
-Build a lightweight pipeline that can surface potential leads, gather basic site evidence, apply a simple scoring rubric, and export results for manual review.
+Build a lightweight local pipeline that can surface potential leads, gather site evidence, apply deterministic scoring, and export a compact review package for manual outreach review.
 
 ## Current Status
 
-Phase 2 foundation in progress. The project now includes the initial database setup, core SQLAlchemy models, and a simple database initialization script, while the real discovery, crawling, browser automation, and scoring logic are still placeholders.
+The repo is now a script-driven MVP for repeated weekly lead runs. Discovery, prefiltering, crawl, browser checks, scoring, and review-package export are all wired together for local use.
 
-## Planned Workflow
+## Workflow
 
 1. Discovery: find candidate businesses and websites.
-2. Crawl: fetch site pages and identify relevant URLs.
-3. Screenshots / Checks: capture site visuals and run basic site-quality checks.
-4. Scoring: apply a rubric to evaluate refresh potential.
-5. Export / Review: export lead data and generate review summaries.
+2. Prefilter: mark obvious `strong`, `maybe`, and `skip` leads.
+3. Crawl: fetch core site pages and save raw HTML.
+4. Screenshots / Checks: capture homepage screenshots and browser signals.
+5. Scoring: apply the rubric and store notes.
+6. Export / Review: create a compact shortlist package for manual review.
 
-## Getting Started
+## Setup
 
-1. Create a virtual environment.
-2. Install dependencies from `requirements.txt`.
-3. Copy `.env.example` to `.env` and fill in any needed values.
-4. Run `python -m app.main`.
+1. Create and activate a virtual environment.
+2. Install dependencies.
+3. Install Playwright browsers.
+4. Copy `.env.example` to `.env` and fill in your Places API key.
 
-## Environment
-
-The project loads environment variables from `.env` via `python-dotenv`. The example file is `.env.example`, and the main database setting is:
-
-```env
-DATABASE_URL=sqlite:///data/leads.db
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install
+cp .env.example .env
 ```
 
-This keeps the local SQLite database inside the existing `data/` directory.
+## Database Init
 
-## Initialize the Database
-
-After installing dependencies and setting up `.env`, create the local database tables with:
+Create the local SQLite database and tables:
 
 ```bash
 python -m app.init_db
 ```
+
+The project reads configuration from `.env` via `python-dotenv`. The main database setting is:
+
+```bash
+DATABASE_URL=sqlite:///data/leads.db
+```
+
+## Single-Query Usage
+
+Run the full pipeline for one query:
+
+```bash
+python -m app.main --query "painters lowell ma" --niche painters
+```
+
+Optional discovery controls:
+
+```bash
+python -m app.main \
+  --query "painters lowell ma" \
+  --niche painters \
+  --page-size 10 \
+  --max-pages 2
+```
+
+## Multi-Query Usage
+
+Run multiple queries from a plain text file:
+
+```bash
+python -m app.main --query-file prompts/weekly_queries.txt --niche painters
+```
+
+The query file supports:
+
+- One query per line, using the CLI `--niche` as the shared niche
+- Or `query | niche` per line when different niches are needed
+
+Example:
+
+```text
+painters lowell ma
+painters chelmsford ma
+pressure washing nashua nh | pressure_washing
+```
+
+## Discovery-Only Usage
+
+If you want to run discovery by itself:
+
+```bash
+python -m app.discovery.run_places \
+  --query "painters lowell ma" \
+  --niche painters \
+  --page-size 10 \
+  --max-pages 2
+```
+
+## Output Files
+
+The pipeline writes local artifacts to:
+
+- `data/leads.db`: SQLite database
+- `data/raw/`: raw HTML captured during crawl
+- `data/screenshots/`: desktop and mobile homepage screenshots
+- `data/browser_checks/`: JSON browser-check reports
+- `data/exports/review_package.csv`: flat shortlist export
+- `data/exports/review_package.json`: structured shortlist export
+
+The review package includes:
+
+- business info and review counts
+- final `fit_status`, score, and confidence
+- per-dimension score breakdown
+- selected page URLs
+- screenshot paths
+- top issues, quick summary, teardown angle, and skip reason

@@ -4,21 +4,26 @@ from __future__ import annotations
 
 from collections import Counter
 
-from sqlalchemy import desc
+from sqlalchemy import case
 
 from app.db import SessionLocal
-from app.models import Business, Page
+from app.models import Business
 from app.scoring.rubric import evaluate_business, upsert_score_and_note
 
 
-def main() -> None:
+def run_scoring() -> Counter[str]:
+    """Run the scoring rubric across businesses currently marked strong or maybe."""
+    status_order = case(
+        (Business.fit_status == "strong", 0),
+        (Business.fit_status == "maybe", 1),
+        else_=2,
+    )
+
     with SessionLocal() as session:
         businesses = (
             session.query(Business)
-            .join(Page, Page.business_id == Business.id)
-            .filter(Page.page_type == "home")
-            .distinct()
-            .order_by(desc(Business.review_count), Business.name.asc())
+            .filter(Business.fit_status.in_(["strong", "maybe"]))
+            .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
         )
 
@@ -43,6 +48,12 @@ def main() -> None:
         print(f"Strong: {counts['strong']}")
         print(f"Maybe: {counts['maybe']}")
         print(f"Skip: {counts['skip']}")
+
+        return counts
+
+
+def main() -> None:
+    run_scoring()
 
 
 if __name__ == "__main__":

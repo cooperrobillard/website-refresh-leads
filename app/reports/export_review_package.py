@@ -191,7 +191,7 @@ def write_csv(records: list[dict[str, Any]], output_path: Path) -> None:
             )
 
 
-def export_review_package(limit: int = 20, include_maybe: bool = True) -> None:
+def export_review_package(limit: int = 20, include_maybe: bool = True) -> list[dict[str, Any]]:
     """Export strong leads, plus maybe leads when requested, to JSON and CSV."""
     status_order = case(
         (Score.fit_status == "strong", 0),
@@ -265,6 +265,8 @@ def export_review_package(limit: int = 20, include_maybe: bool = True) -> None:
         print(f"Maybe: {maybe_count}")
         print(f"JSON: {json_path}")
         print(f"CSV:  {csv_path}")
+
+        return records
 
 
 if __name__ == "__main__":
