@@ -4,6 +4,7 @@ __pycache__/
 .env
 data/raw/
 data/screenshots/
+data/browser_checks/
 data/exports/
 data/*.db
 .DS_Store
