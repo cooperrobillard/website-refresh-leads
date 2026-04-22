@@ -8,7 +8,7 @@ Build a lightweight pipeline that can surface potential leads, gather basic site
 
 ## Current Status
 
-Phase 1 scaffold only. The project structure, module boundaries, and base configuration are in place, but the real integrations and pipeline logic have not been implemented yet.
+Phase 2 foundation in progress. The project now includes the initial database setup, core SQLAlchemy models, and a simple database initialization script, while the real discovery, crawling, browser automation, and scoring logic are still placeholders.
 
 ## Planned Workflow
 
@@ -24,3 +24,21 @@ Phase 1 scaffold only. The project structure, module boundaries, and base config
 2. Install dependencies from `requirements.txt`.
 3. Copy `.env.example` to `.env` and fill in any needed values.
 4. Run `python -m app.main`.
+
+## Environment
+
+The project loads environment variables from `.env` via `python-dotenv`. The example file is `.env.example`, and the main database setting is:
+
+```env
+DATABASE_URL=sqlite:///data/leads.db
+```
+
+This keeps the local SQLite database inside the existing `data/` directory.
+
+## Initialize the Database
+
+After installing dependencies and setting up `.env`, create the local database tables with:
+
+```bash
+python -m app.init_db
+```

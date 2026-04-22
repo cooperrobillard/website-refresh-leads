@@ -5,4 +5,5 @@ __pycache__/
 data/raw/
 data/screenshots/
 data/exports/
+data/*.db
 .DS_Store
