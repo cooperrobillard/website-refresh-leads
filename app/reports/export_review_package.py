@@ -1,4 +1,4 @@
-"""Export a compact review package for manual lead review."""
+"""Export a compact review package for current-run lead review."""
 
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import case
+from sqlalchemy.orm import Session
 
 from app.crawl.page_selector import normalize_url, should_skip_link
 from app.db import SessionLocal
 from app.lead_selection import normalized_website_key
 from app.models import Artifact, Business, Note, Page, Score
-from app.pipeline_runs import businesses_for_run_query, resolve_pipeline_run
+from app.pipeline_runs import resolve_pipeline_run
 
 
 EXPORT_DIR = Path("data/exports")
@@ -32,10 +33,15 @@ SCREENSHOT_EXPORT_TYPES = {
 }
 CSV_COLUMNS = [
     "business_id",
+    "discovery_run_id",
+    "new_this_run",
     "business_name",
     "niche",
+    "query_used",
     "location",
     "website",
+    "canonical_url",
+    "canonical_key",
     "primary_type",
     "google_rating",
     "google_review_count",
@@ -45,6 +51,8 @@ CSV_COLUMNS = [
     "confidence",
     "evidence_tier",
     "evidence_cap",
+    "pages_captured",
+    "screenshots_captured",
     "business_legitimacy",
     "website_weakness",
     "conversion_opportunity",
@@ -52,6 +60,7 @@ CSV_COLUMNS = [
     "complexity_fit",
     "outreach_viability",
     "outreach_story_strength",
+    "outreach_story_assessment",
     "home_url",
     "about_url",
     "services_url",
@@ -64,6 +73,16 @@ CSV_COLUMNS = [
     "quick_summary",
     "teardown_angle",
     "skip_reason",
+]
+
+SCORE_DIMENSIONS = [
+    "business_legitimacy",
+    "website_weakness",
+    "conversion_opportunity",
+    "trust_packaging",
+    "complexity_fit",
+    "outreach_viability",
+    "outreach_story_strength",
 ]
 
 
@@ -126,22 +145,74 @@ def build_artifact_maps(rows: list[Artifact]) -> dict[int, dict[str, str]]:
     return artifact_maps
 
 
+def current_run_new_businesses_query(session: Session, run_id: int):
+    """Return only businesses first admitted in the current run."""
+    return session.query(Business).filter(Business.discovery_run_id == run_id)
+
+
+def captured_page_count(page_map: dict[str, str | None]) -> int:
+    """Count exported page URLs for evidence debugging."""
+    return sum(1 for page_type in PAGE_TYPES if page_map.get(page_type))
+
+
+def captured_screenshot_count(artifact_map: dict[str, str]) -> int:
+    """Count available homepage screenshots for evidence debugging."""
+    return sum(
+        1
+        for artifact_type in ARTIFACT_TYPES.values()
+        if artifact_map.get(artifact_type)
+    )
+
+
+def top_scoring_dimensions(score: Score, limit: int = 3) -> list[dict[str, int | str]]:
+    """Return the highest scoring rubric dimensions for quick manual ranking."""
+    ranked_dimensions = sorted(
+        (
+            {"dimension": dimension, "score": getattr(score, dimension) or 0}
+            for dimension in SCORE_DIMENSIONS
+            if (getattr(score, dimension) or 0) > 0
+        ),
+        key=lambda row: (-int(row["score"]), str(row["dimension"])),
+    )
+    return ranked_dimensions[:limit]
+
+
+def outreach_story_assessment(score_value: int | None) -> str:
+    """Return a readable outreach-story label for exported review records."""
+    strength = score_value or 0
+    if strength >= 9:
+        return "strong"
+    if strength >= 5:
+        return "fair"
+    if strength >= 1:
+        return "weak"
+    return "minimal"
+
+
 def build_review_record(
     business: Business,
     score: Score,
     note: Note | None,
     page_map: dict[str, str | None],
     artifact_map: dict[str, str],
+    current_run_id: int,
 ) -> dict[str, Any]:
     """Build one exported review record."""
     top_issues = parse_top_issues(note.top_issues if note else None)
+    pages_captured = captured_page_count(page_map)
+    screenshots_captured = captured_screenshot_count(artifact_map)
 
     return {
         "business_id": business.id,
+        "discovery_run_id": business.discovery_run_id,
+        "new_this_run": business.discovery_run_id == current_run_id,
         "business_name": business.name,
         "niche": business.niche,
+        "query_used": business.query_used,
         "location": business.address,
         "website": normalize_url(business.website) if business.website else None,
+        "canonical_url": normalize_url(business.canonical_url) if business.canonical_url else None,
+        "canonical_key": business.canonical_key,
         "primary_type": business.primary_type,
         "google_rating": business.rating,
         "google_review_count": business.review_count,
@@ -151,6 +222,8 @@ def build_review_record(
         "confidence": score.confidence,
         "evidence_tier": score.evidence_tier,
         "evidence_cap": score.evidence_cap,
+        "pages_captured": pages_captured,
+        "screenshots_captured": screenshots_captured,
         "scores": {
             "business_legitimacy": score.business_legitimacy,
             "website_weakness": score.website_weakness,
@@ -159,6 +232,23 @@ def build_review_record(
             "complexity_fit": score.complexity_fit,
             "outreach_viability": score.outreach_viability,
             "outreach_story_strength": score.outreach_story_strength,
+        },
+        "review_context": {
+            "why_it_qualified": note.quick_summary if note else None,
+            "top_scoring_dimensions": top_scoring_dimensions(score),
+            "evidence": {
+                "tier": score.evidence_tier,
+                "confidence": score.confidence,
+                "cap": score.evidence_cap,
+                "raw_total_score": score.raw_total_score,
+                "pages_captured": pages_captured,
+                "screenshots_captured": screenshots_captured,
+            },
+            "outreach_story": {
+                "strength_score": score.outreach_story_strength,
+                "assessment": outreach_story_assessment(score.outreach_story_strength),
+                "primary_gaps": top_issues[:2],
+            },
         },
         "pages_found": {page_type: page_map.get(page_type) for page_type in PAGE_TYPES},
         "screenshots": {
@@ -278,10 +368,15 @@ def write_csv(records: list[dict[str, Any]], output_path: Path) -> None:
             writer.writerow(
                 [
                     record["business_id"],
+                    record["discovery_run_id"],
+                    record["new_this_run"],
                     record["business_name"],
                     record["niche"],
+                    record["query_used"],
                     record["location"],
                     record["website"],
+                    record["canonical_url"],
+                    record["canonical_key"],
                     record["primary_type"],
                     record["google_rating"],
                     record["google_review_count"],
@@ -291,6 +386,8 @@ def write_csv(records: list[dict[str, Any]], output_path: Path) -> None:
                     record["confidence"],
                     record["evidence_tier"],
                     record["evidence_cap"],
+                    record["pages_captured"],
+                    record["screenshots_captured"],
                     record["scores"]["business_legitimacy"],
                     record["scores"]["website_weakness"],
                     record["scores"]["conversion_opportunity"],
@@ -298,6 +395,7 @@ def write_csv(records: list[dict[str, Any]], output_path: Path) -> None:
                     record["scores"]["complexity_fit"],
                     record["scores"]["outreach_viability"],
                     record["scores"]["outreach_story_strength"],
+                    record["review_context"]["outreach_story"]["assessment"],
                     record["pages_found"]["home"],
                     record["pages_found"]["about"],
                     record["pages_found"]["services"],
@@ -354,7 +452,7 @@ def export_review_package(
     fallback_to_skips: bool = True,
     run_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Export strong leads, plus maybe leads when requested, to JSON and CSV."""
+    """Export current-run new leads, plus maybe leads when requested, to JSON and CSV."""
     status_order = case(
         (Score.fit_status == "strong", 0),
         (Score.fit_status == "maybe", 1),
@@ -362,9 +460,9 @@ def export_review_package(
     )
 
     with SessionLocal() as session:
-        current_run_id, allow_revisit = resolve_pipeline_run(session, run_id)
+        current_run_id, _ = resolve_pipeline_run(session, run_id)
         query = (
-            businesses_for_run_query(session, current_run_id, allow_revisit)
+            current_run_new_businesses_query(session, current_run_id)
             .with_entities(Business, Score, Note)
             .join(Score, Score.business_id == Business.id)
             .outerjoin(Note, Note.business_id == Business.id)
@@ -389,7 +487,7 @@ def export_review_package(
 
         if not rows and fallback_to_skips:
             fallback_rows = (
-                businesses_for_run_query(session, current_run_id, allow_revisit)
+                current_run_new_businesses_query(session, current_run_id)
                 .with_entities(Business, Score, Note)
                 .join(Score, Score.business_id == Business.id)
                 .outerjoin(Note, Note.business_id == Business.id)
@@ -401,7 +499,7 @@ def export_review_package(
             rows = fallback_rows[:limit]
             duplicate_count += fallback_duplicate_count
             if rows:
-                print("No strong/maybe leads found. Exporting top scored skip leads as fallback.")
+                print("No current-run strong/maybe leads found. Exporting current-run skip leads as fallback.")
 
         business_ids = [business.id for business, _, _ in rows]
 
@@ -428,6 +526,7 @@ def export_review_package(
                 note=note,
                 page_map=page_maps.get(business.id, {}),
                 artifact_map=artifact_maps.get(business.id, {}),
+                current_run_id=current_run_id,
             )
             for business, score, note in rows
         ]
@@ -442,7 +541,8 @@ def export_review_package(
         strong_count = sum(1 for record in records if record["fit_status"] == "strong")
         maybe_count = sum(1 for record in records if record["fit_status"] == "maybe")
 
-        print(f"Run {current_run_id}: exported {len(records)} leads")
+        print(f"Run {current_run_id}: exporting current-run new candidates only")
+        print(f"Exported {len(records)} leads")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
         print(f"Strong: {strong_count}")

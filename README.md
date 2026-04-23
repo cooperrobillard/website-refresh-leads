@@ -19,7 +19,7 @@ Canonical website memory is now durable across runs. By default, if a canonical 
 3. Crawl: fetch core site pages and save raw HTML.
 4. Screenshots / Checks: capture homepage screenshots and browser signals.
 5. Scoring: apply the rubric and store notes.
-6. Export / Review: create a compact shortlist package for manual review.
+6. Export / Review: create a compact shortlist package for current-run manual review.
 
 Scoring is deterministic and uses the evidence the repo already collects. If crawl coverage is partial but browser validation still confirms the homepage is reachable, the lead can still be scored with lower confidence instead of automatically collapsing to zero.
 
@@ -78,6 +78,8 @@ python3 -m app.main \
 
 Default duplicate handling is strict across runs at the canonical website level. A later revisit path is plumbed through `--allow-revisit`, but revisits still require the stored business row to be explicitly marked `eligible_for_revisit` first.
 
+Default exports are also strict: `review_package.json` and `review_package.csv` only include businesses first admitted in the current run. Older leads do not resurface in the default review package unless a dedicated export override is added later.
+
 ## Multi-Query Usage
 
 Run multiple queries from a plain text file:
@@ -122,13 +124,15 @@ The pipeline writes local artifacts to:
 - `data/exports/review_package.csv`: flat shortlist export
 - `data/exports/review_package.json`: structured shortlist export
 
-The review package includes:
+The review package includes current-run new candidates only. Within that scope it includes:
 
 - business info and review counts
-- final `fit_status`, score, and confidence
+- run/debug fields such as `query_used`, canonical URL/key, and `discovery_run_id`
+- final `fit_status`, capped score, raw score, evidence tier/cap, and confidence
 - per-dimension score breakdown
+- compact review context for manual ranking: why it qualified, top scoring dimensions, evidence strength, and outreach-story strength
 - selected page URLs
 - screenshot paths
 - top issues, quick summary, teardown angle, and skip reason
 
-If a run produces zero `strong` or `maybe` leads, the exporter automatically falls back to the top scored `skip` leads so the review package is never empty after a nontrivial run.
+If a run produces zero `strong` or `maybe` leads, the exporter automatically falls back to the top scored `skip` leads from that same run only, so prior-run leads still do not reappear by default.
