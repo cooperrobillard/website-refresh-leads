@@ -42,11 +42,16 @@ BLOCKED_EXTENSIONS = {
 }
 
 PAGE_PRIORITY_ORDER = ["about", "services", "contact", "gallery", "faq"]
+PAGE_TYPE_PRIORITY_ORDER = ["home", *PAGE_PRIORITY_ORDER]
 
 
 def normalize_url(url: str) -> str:
     """Normalize a URL for consistent comparison and storage."""
-    parsed = urlparse(url)
+    raw_url = url.strip()
+    if "://" not in raw_url:
+        raw_url = f"https://{raw_url}"
+
+    parsed = urlparse(raw_url)
     scheme = parsed.scheme or "https"
     netloc = parsed.netloc.lower()
     path = parsed.path.rstrip("/") or "/"
@@ -138,4 +143,25 @@ def pick_priority_pages(base_url: str, candidates: list[dict[str, str | None]]) 
             if isinstance(selected_url, str):
                 selected[page_type] = selected_url
 
-    return selected
+    return dedupe_selected_pages(selected)
+
+
+def dedupe_selected_pages(selected_pages: dict[str, str]) -> dict[str, str]:
+    """Keep the highest-priority page type for each normalized URL."""
+    selected_by_type: dict[str, str] = {}
+    seen_urls: set[str] = set()
+    remaining_types = [page_type for page_type in selected_pages if page_type not in PAGE_TYPE_PRIORITY_ORDER]
+
+    for page_type in [*PAGE_TYPE_PRIORITY_ORDER, *remaining_types]:
+        url = selected_pages.get(page_type)
+        if not url:
+            continue
+
+        normalized_url = normalize_url(url)
+        if normalized_url in seen_urls:
+            continue
+
+        seen_urls.add(normalized_url)
+        selected_by_type[page_type] = normalized_url
+
+    return selected_by_type

@@ -8,7 +8,12 @@ import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
-from app.crawl.page_selector import extract_internal_candidate_links, normalize_url, pick_priority_pages
+from app.crawl.page_selector import (
+    PAGE_TYPE_PRIORITY_ORDER,
+    extract_internal_candidate_links,
+    normalize_url,
+    pick_priority_pages,
+)
 from app.models import Business, Page
 
 
@@ -86,6 +91,22 @@ def save_raw_html(business_name: str, page_type: str, html: str) -> str:
     return str(path)
 
 
+def preferred_page_type(existing_type: str | None, incoming_type: str) -> str:
+    """Return the higher-priority page type for one URL."""
+    priority = {page_type: index for index, page_type in enumerate(PAGE_TYPE_PRIORITY_ORDER)}
+    existing_rank = priority.get(existing_type or "", len(priority))
+    incoming_rank = priority.get(incoming_type, len(priority))
+    return incoming_type if incoming_rank < existing_rank else existing_type or incoming_type
+
+
+def find_pending_page(session: Session, business_id: int, url: str) -> Page | None:
+    """Find a matching Page already added to the current uncommitted session."""
+    for item in session.new:
+        if isinstance(item, Page) and item.business_id == business_id and item.url == url:
+            return item
+    return None
+
+
 def upsert_page(
     session: Session,
     business_id: int,
@@ -96,23 +117,30 @@ def upsert_page(
     html_path: str | None,
 ) -> None:
     """Insert or update one crawled page record for a business."""
-    existing = (
-        session.query(Page)
-        .filter(Page.business_id == business_id, Page.url == url)
-        .first()
-    )
+    normalized_url = normalize_url(url)
+    existing = find_pending_page(session, business_id, normalized_url)
+
+    if existing is None:
+        existing = (
+            session.query(Page)
+            .filter(Page.business_id == business_id, Page.url == normalized_url)
+            .first()
+        )
 
     if existing:
-        existing.page_type = page_type
+        preferred_type = preferred_page_type(existing.page_type, page_type)
+        type_changed = preferred_type != existing.page_type
+        existing.page_type = preferred_type
         existing.title = title
         existing.raw_text = raw_text
-        existing.html_path = html_path
+        if type_changed or not existing.html_path or preferred_type == page_type:
+            existing.html_path = html_path
     else:
         session.add(
             Page(
                 business_id=business_id,
                 page_type=page_type,
-                url=url,
+                url=normalized_url,
                 title=title,
                 raw_text=raw_text,
                 html_path=html_path,
