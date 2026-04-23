@@ -377,6 +377,7 @@ def functional_site_signals(
     full_text = combined_text(page_map)
     browser_signals = report.get("homepage_signals", {})
     primary_type_hint = _primary_type_hint(business)
+    section_hits = sum(1 for hint in SECTION_HINTS if hint in home_text)
 
     clear_value_prop = bool(
         len(excerpt) >= 220
@@ -392,9 +393,9 @@ def functional_site_signals(
         or browser_signals.get("cta_visible_near_top", False)
     )
     organized_homepage = bool(
-        len(home_text) >= 700
-        or count_relevant_pages(page_map) >= 4
-        or sum(1 for hint in SECTION_HINTS if hint in home_text) >= 2
+        count_relevant_pages(page_map) >= 4
+        or section_hits >= 4
+        or (section_hits >= 3 and len(home_text) >= 1100)
     )
     service_structure = bool(
         "services" in page_map
@@ -417,6 +418,46 @@ def functional_site_signals(
         "project_proof": project_proof,
         "trust_signals": trust_signals,
         "brochure_structure": brochure_structure,
+    }
+
+
+def legacy_brochure_signals(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> dict[str, bool]:
+    """Return narrow signals for dated but legitimate brochure-style sites."""
+    basics = functional_site_signals(business, page_map, report)
+    home_text = homepage_text(page_map)
+    full_text = combined_text(page_map)
+    relevant_pages = count_relevant_pages(page_map)
+    useful_pages = count_pages_with_text(page_map)
+    review_count = business.review_count or 0
+
+    sparse_brochure_coverage = bool(
+        relevant_pages <= 3
+        and useful_pages <= 3
+        and len(full_text) < 2200
+    )
+    text_heavy_homepage = bool(
+        len(home_text) >= 600
+        and relevant_pages <= 3
+        and len(full_text) < 2200
+        and not basics["organized_homepage"]
+    )
+    trust_packaging_gap = bool(review_count >= 8 and not basics["trust_signals"])
+    dated_brochure_opportunity = bool(
+        basics["clear_contact_path"]
+        and basics["service_structure"]
+        and trust_packaging_gap
+        and (text_heavy_homepage or sparse_brochure_coverage)
+    )
+
+    return {
+        "sparse_brochure_coverage": sparse_brochure_coverage,
+        "text_heavy_homepage": text_heavy_homepage,
+        "trust_packaging_gap": trust_packaging_gap,
+        "dated_brochure_opportunity": dated_brochure_opportunity,
     }
 
 
@@ -563,6 +604,7 @@ def score_website_weakness(
     full_text = combined_text(page_map)
     relevant_pages = count_relevant_pages(page_map)
     basics = functional_site_signals(business, page_map, report)
+    legacy = legacy_brochure_signals(business, page_map, report)
     browser_signals = report.get("homepage_signals", {})
 
     if not basics["service_structure"]:
@@ -590,6 +632,15 @@ def score_website_weakness(
     elif relevant_pages == 3:
         score += 1
 
+    if legacy["text_heavy_homepage"]:
+        score += 3
+
+    if legacy["sparse_brochure_coverage"]:
+        score += 2
+
+    if legacy["trust_packaging_gap"]:
+        score += 2
+
     if is_google_sites_site(business, page_map, report):
         score += 5
 
@@ -611,7 +662,7 @@ def score_website_weakness(
     if basics["trust_signals"]:
         credits += 2
     if basics["brochure_structure"]:
-        credits += 3
+        credits += 1 if legacy["sparse_brochure_coverage"] else 3
 
     score -= credits
     return clamp(score, 0, WEIGHTS["website_weakness"])
@@ -760,6 +811,7 @@ def score_outreach_story_strength(
     score = 0
     gaps = story_gap_labels(business, page_map, report)
     basics = functional_site_signals(business, page_map, report)
+    legacy = legacy_brochure_signals(business, page_map, report)
 
     if len(gaps) >= 2:
         score += 6
@@ -783,13 +835,16 @@ def score_outreach_story_strength(
     if homepage_loaded(report):
         score += 1
 
+    if legacy["dated_brochure_opportunity"]:
+        score += 1
+
     if basics["brochure_structure"] and basics["clear_contact_path"] and len(gaps) <= 1:
-        score -= 4
+        score -= 2 if legacy["dated_brochure_opportunity"] else 4
     elif basics["brochure_structure"] and len(gaps) == 2:
         score -= 1
 
     if basics["clear_value_prop"] and basics["service_structure"] and len(gaps) <= 1:
-        score -= 2
+        score -= 1 if legacy["dated_brochure_opportunity"] else 2
 
     return clamp(score, 0, WEIGHTS["outreach_story_strength"])
 
@@ -801,6 +856,10 @@ def build_top_issues(
 ) -> list[str]:
     """Build a short list of concrete site issues to mention in notes."""
     issues = [GAP_LABELS[label] for label in story_gap_labels(business, page_map, report)]
+    legacy = legacy_brochure_signals(business, page_map, report)
+
+    if legacy["dated_brochure_opportunity"]:
+        issues.insert(0, "Site covers the basics, but the presentation still feels dated and under-packaged.")
 
     if not issues:
         issues.append("Website looks usable, but the redesign opportunity is less obvious.")
