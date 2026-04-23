@@ -53,6 +53,20 @@ class ScoringRubricTests(unittest.TestCase):
         assert result.reason is not None
         self.assertIn("Franchise", result.reason)
 
+    def test_prefilter_allows_low_review_business_when_site_is_not_obviously_wrong(self) -> None:
+        business = Business(
+            name="Acme Painting",
+            website="https://acme.example.com",
+            primary_type="painter",
+            review_count=3,
+            rating=4.2,
+        )
+
+        result = passes_basic_filters(business)
+
+        self.assertEqual(result.fit_status, "strong")
+        self.assertIsNone(result.reason)
+
     def test_structured_brochure_site_gets_lower_weakness_score(self) -> None:
         business = Business(
             name="Acme Painting",

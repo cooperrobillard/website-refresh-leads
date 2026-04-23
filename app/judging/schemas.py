@@ -13,17 +13,23 @@ class BusinessJudgingPackage:
     business_id: int
     pipeline_run_id: int
     business_name: str
+    website: str | None
+    canonical_url: str | None
     niche: str | None
     query_used: str | None
-    website: str | None
-    prefilter_status: str | None
-    prefilter_reason: str | None
     location: str | None
-    review_count: int | None
-    rating: float | None
-    page_snapshots: list[dict[str, str | None]] = field(default_factory=list)
+    primary_type: str | None
+    google_rating: float | None
+    google_review_count: int | None
+    browser_homepage_signals: dict[str, bool] = field(default_factory=dict)
+    page_load_map: dict[str, bool] = field(default_factory=dict)
+    pages_found: dict[str, str | None] = field(default_factory=dict)
+    pages_captured_count: int = 0
+    screenshots_captured_count: int = 0
+    text_excerpts: dict[str, str | None] = field(default_factory=dict)
     screenshot_paths: dict[str, str | None] = field(default_factory=dict)
-    browser_report: dict[str, Any] = field(default_factory=dict)
+    evidence_summary: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,4 +60,3 @@ class ModelJudgeOutcome:
     short_teardown_angle: str | None = None
     short_reasoning: str | None = None
     raw_json: dict[str, Any] = field(default_factory=dict)
-
