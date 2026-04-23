@@ -107,12 +107,12 @@ def run_pipeline_for_query(
     """Run the full sequential pipeline for one query/niche pair."""
     print(f"Query: {query}")
     print(f"Niche: {niche}")
-    current_run = start_pipeline_run(
+    current_run_id = start_pipeline_run(
         query=query,
         niche=niche,
         allow_revisit=allow_revisit,
     )
-    print(f"Run ID: {current_run.id} | allow_revisit={current_run.allow_revisit}")
+    print(f"Run ID: {current_run_id} | allow_revisit={allow_revisit}")
 
     try:
         print("\n[1/6] Discovery")
@@ -121,25 +121,25 @@ def run_pipeline_for_query(
             niche=niche,
             page_size=page_size,
             max_pages=max_pages,
-            run_id=current_run.id,
+            run_id=current_run_id,
         )
 
         print("\n[2/6] Prefilter")
-        run_prefilter(run_id=current_run.id)
+        run_prefilter(run_id=current_run_id)
 
         print("\n[3/6] Crawl")
-        run_crawl(run_id=current_run.id)
+        run_crawl(run_id=current_run_id)
 
         print("\n[4/6] Browser Checks")
-        run_browser_validation(run_id=current_run.id)
+        run_browser_validation(run_id=current_run_id)
 
         print("\n[5/6] Scoring")
-        run_scoring(run_id=current_run.id)
+        run_scoring(run_id=current_run_id)
 
         print("\n[6/6] Export Review Package")
-        export_review_package(limit=20, include_maybe=True, run_id=current_run.id)
+        export_review_package(limit=20, include_maybe=True, run_id=current_run_id)
     finally:
-        finish_pipeline_run(current_run.id)
+        finish_pipeline_run(current_run_id)
 
 
 def main() -> None:

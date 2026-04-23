@@ -5,11 +5,11 @@ from __future__ import annotations
 import unittest
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.discovery.places import upsert_businesses
-from app.models import Business, PipelineRun
+from app.models import Business
 from app.pipeline_runs import businesses_for_run_query, create_pipeline_run
 
 
@@ -26,7 +26,7 @@ class DiscoveryMemoryTests(unittest.TestCase):
 
     def test_default_cross_run_exclusion_skips_existing_canonical_sites(self) -> None:
         with self.Session() as session:
-            first_run = create_pipeline_run(session, query="painters lowell ma", niche="painters")
+            first_run_id = create_pipeline_run(session, query="painters lowell ma", niche="painters")
             first_counts = upsert_businesses(
                 session=session,
                 places=[
@@ -42,11 +42,11 @@ class DiscoveryMemoryTests(unittest.TestCase):
                 ],
                 niche="painters",
                 query_used="painters lowell ma",
-                current_run=first_run,
+                current_run_id=first_run_id,
             )
             self.assertEqual(first_counts["inserted"], 1)
 
-            second_run = create_pipeline_run(session, query="painters lowell ma", niche="painters")
+            second_run_id = create_pipeline_run(session, query="painters lowell ma", niche="painters")
             second_counts = upsert_businesses(
                 session=session,
                 places=[
@@ -62,7 +62,7 @@ class DiscoveryMemoryTests(unittest.TestCase):
                 ],
                 niche="painters",
                 query_used="painters lowell ma",
-                current_run=second_run,
+                current_run_id=second_run_id,
             )
 
             self.assertEqual(second_counts["inserted"], 0)
@@ -70,13 +70,13 @@ class DiscoveryMemoryTests(unittest.TestCase):
 
             businesses = session.query(Business).order_by(Business.id.asc()).all()
             self.assertEqual(len(businesses), 1)
-            self.assertEqual(businesses[0].discovery_run_id, first_run.id)
+            self.assertEqual(businesses[0].discovery_run_id, first_run_id)
             self.assertEqual(businesses[0].canonical_key, "acmepainting.com")
-            self.assertEqual(businesses[0].last_seen_run_id, second_run.id)
+            self.assertEqual(businesses[0].last_seen_run_id, second_run_id)
 
     def test_allow_revisit_only_re_admits_eligible_businesses(self) -> None:
         with self.Session() as session:
-            first_run = create_pipeline_run(session, query="painters lowell ma", niche="painters")
+            first_run_id = create_pipeline_run(session, query="painters lowell ma", niche="painters")
             upsert_businesses(
                 session=session,
                 places=[
@@ -92,7 +92,7 @@ class DiscoveryMemoryTests(unittest.TestCase):
                 ],
                 niche="painters",
                 query_used="painters lowell ma",
-                current_run=first_run,
+                current_run_id=first_run_id,
             )
 
             business = session.query(Business).first()
@@ -101,7 +101,7 @@ class DiscoveryMemoryTests(unittest.TestCase):
             business.eligible_for_revisit = True
             session.commit()
 
-            revisit_run = create_pipeline_run(
+            revisit_run_id = create_pipeline_run(
                 session,
                 query="painters lowell ma",
                 niche="painters",
@@ -122,11 +122,12 @@ class DiscoveryMemoryTests(unittest.TestCase):
                 ],
                 niche="painters",
                 query_used="painters lowell ma",
-                current_run=revisit_run,
+                current_run_id=revisit_run_id,
+                allow_revisit=True,
             )
 
             self.assertEqual(counts["skipped_existing_processed"], 0)
-            scoped_businesses = businesses_for_run_query(session, revisit_run).all()
+            scoped_businesses = businesses_for_run_query(session, revisit_run_id, allow_revisit=True).all()
             self.assertEqual([row.id for row in scoped_businesses], [business.id])
 
 

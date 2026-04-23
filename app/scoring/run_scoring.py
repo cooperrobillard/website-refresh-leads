@@ -23,9 +23,9 @@ def run_scoring(run_id: int | None = None) -> Counter[str]:
     )
 
     with SessionLocal() as session:
-        current_run = resolve_pipeline_run(session, run_id)
+        current_run_id, allow_revisit = resolve_pipeline_run(session, run_id)
         queried_businesses = (
-            businesses_for_run_query(session, current_run)
+            businesses_for_run_query(session, current_run_id, allow_revisit)
             .filter(Business.fit_status.in_(["strong", "maybe"]))
             .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
@@ -37,7 +37,7 @@ def run_scoring(run_id: int | None = None) -> Counter[str]:
             for business in businesses
         }
 
-        print(f"Run {current_run.id}: scoring {len(businesses)} businesses")
+        print(f"Run {current_run_id}: scoring {len(businesses)} businesses")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
         counts: Counter[str] = Counter()

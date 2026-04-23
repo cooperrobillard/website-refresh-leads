@@ -7,8 +7,7 @@ from typing import Any
 
 from app.db import SessionLocal
 from app.discovery.places import search_places_text, upsert_businesses
-from app.pipeline_runs import create_pipeline_run, finish_pipeline_run
-from app.models import PipelineRun
+from app.pipeline_runs import create_pipeline_run, finish_pipeline_run, resolve_pipeline_run
 from app.schema import ensure_database_schema
 
 
@@ -38,15 +37,14 @@ def run_places_query(
 
     with SessionLocal() as session:
         if run_id is None:
-            current_run = create_pipeline_run(
+            current_run_id = create_pipeline_run(
                 session,
                 query=query,
                 niche=niche,
             )
+            current_allow_revisit = False
         else:
-            current_run = session.get(PipelineRun, run_id)
-            if current_run is None:
-                raise ValueError(f"Pipeline run not found: {run_id}")
+            current_run_id, current_allow_revisit = resolve_pipeline_run(session, run_id)
 
         while page_number < max_pages:
             page_number += 1
@@ -62,7 +60,8 @@ def run_places_query(
                 places=places,
                 niche=niche,
                 query_used=query,
-                current_run=current_run,
+                current_run_id=current_run_id,
+                allow_revisit=current_allow_revisit,
             )
 
             total_places += len(places)
@@ -84,10 +83,10 @@ def run_places_query(
                 break
 
     if created_run_locally:
-        finish_pipeline_run(current_run.id)
+        finish_pipeline_run(current_run_id)
 
     print(
-        f"Done: run_id={current_run.id} pages={page_number} found={total_places}"
+        f"Done: run_id={current_run_id} pages={page_number} found={total_places}"
     )
     print(
         f"  inserted_new={total_inserted} "
@@ -96,7 +95,7 @@ def run_places_query(
     )
 
     return {
-        "run_id": current_run.id,
+        "run_id": current_run_id,
         "pages_fetched": page_number,
         "places_found": total_places,
         "inserted": total_inserted,
@@ -137,14 +136,14 @@ def main() -> None:
     ensure_database_schema()
     args = parse_args()
     with SessionLocal() as session:
-        current_run = create_pipeline_run(
+        current_run_id = create_pipeline_run(
             session,
             query=args.query,
             niche=args.niche,
             allow_revisit=args.allow_revisit,
         )
 
-    print(f"Pipeline run {current_run.id} | allow_revisit={current_run.allow_revisit}")
+    print(f"Pipeline run {current_run_id} | allow_revisit={args.allow_revisit}")
 
     try:
         run_places_query(
@@ -152,10 +151,10 @@ def main() -> None:
             niche=args.niche,
             page_size=args.page_size,
             max_pages=args.max_pages,
-            run_id=current_run.id,
+            run_id=current_run_id,
         )
     finally:
-        finish_pipeline_run(current_run.id)
+        finish_pipeline_run(current_run_id)
 
 
 if __name__ == "__main__":

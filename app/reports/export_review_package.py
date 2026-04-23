@@ -350,9 +350,9 @@ def export_review_package(
     )
 
     with SessionLocal() as session:
-        current_run = resolve_pipeline_run(session, run_id)
+        current_run_id, allow_revisit = resolve_pipeline_run(session, run_id)
         query = (
-            businesses_for_run_query(session, current_run)
+            businesses_for_run_query(session, current_run_id, allow_revisit)
             .with_entities(Business, Score, Note)
             .join(Score, Score.business_id == Business.id)
             .outerjoin(Note, Note.business_id == Business.id)
@@ -377,7 +377,7 @@ def export_review_package(
 
         if not rows and fallback_to_skips:
             fallback_rows = (
-                businesses_for_run_query(session, current_run)
+                businesses_for_run_query(session, current_run_id, allow_revisit)
                 .with_entities(Business, Score, Note)
                 .join(Score, Score.business_id == Business.id)
                 .outerjoin(Note, Note.business_id == Business.id)
@@ -430,7 +430,7 @@ def export_review_package(
         strong_count = sum(1 for record in records if record["fit_status"] == "strong")
         maybe_count = sum(1 for record in records if record["fit_status"] == "maybe")
 
-        print(f"Run {current_run.id}: exported {len(records)} leads")
+        print(f"Run {current_run_id}: exported {len(records)} leads")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
         print(f"Strong: {strong_count}")

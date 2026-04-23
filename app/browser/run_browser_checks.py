@@ -24,17 +24,17 @@ def run_browser_validation(run_id: int | None = None) -> Counter[str]:
     )
 
     with SessionLocal() as session:
-        current_run = resolve_pipeline_run(session, run_id)
+        current_run_id, allow_revisit = resolve_pipeline_run(session, run_id)
         counts: Counter[str] = Counter()
         queried_businesses = (
-            businesses_for_run_query(session, current_run)
+            businesses_for_run_query(session, current_run_id, allow_revisit)
             .filter(Business.fit_status.in_(["strong", "maybe"]))
             .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
         )
         businesses, duplicate_count = dedupe_businesses_by_website(queried_businesses)
 
-        print(f"Run {current_run.id}: found {len(businesses)} businesses for browser validation")
+        print(f"Run {current_run_id}: found {len(businesses)} businesses for browser validation")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
 

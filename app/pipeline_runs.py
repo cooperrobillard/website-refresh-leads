@@ -18,8 +18,8 @@ def create_pipeline_run(
     niche: str,
     allow_revisit: bool = False,
     run_label: str | None = None,
-) -> PipelineRun:
-    """Insert and return one pipeline run row."""
+) -> int:
+    """Insert one pipeline run row and return its id."""
     run = PipelineRun(
         query=query,
         niche=niche,
@@ -27,9 +27,10 @@ def create_pipeline_run(
         run_label=run_label,
     )
     session.add(run)
+    session.flush()
+    run_id = run.id
     session.commit()
-    session.refresh(run)
-    return run
+    return run_id
 
 
 def start_pipeline_run(
@@ -38,8 +39,8 @@ def start_pipeline_run(
     niche: str,
     allow_revisit: bool = False,
     run_label: str | None = None,
-) -> PipelineRun:
-    """Create a pipeline run using a short-lived session."""
+) -> int:
+    """Create a pipeline run using a short-lived session and return its id."""
     with SessionLocal() as session:
         return create_pipeline_run(
             session,
@@ -50,34 +51,38 @@ def start_pipeline_run(
         )
 
 
-def resolve_pipeline_run(session: Session, run_id: int | None = None) -> PipelineRun:
-    """Return a specific run or the most recent run when no id is provided."""
+def resolve_pipeline_run(session: Session, run_id: int | None = None) -> tuple[int, bool]:
+    """Return the resolved run id and its allow_revisit setting."""
     if run_id is not None:
-        run = session.get(PipelineRun, run_id)
-        if run is None:
+        row = (
+            session.query(PipelineRun.id, PipelineRun.allow_revisit)
+            .filter(PipelineRun.id == run_id)
+            .first()
+        )
+        if row is None:
             raise ValueError(f"Pipeline run not found: {run_id}")
-        return run
+        return int(row[0]), bool(row[1])
 
-    run = (
-        session.query(PipelineRun)
+    row = (
+        session.query(PipelineRun.id, PipelineRun.allow_revisit)
         .order_by(PipelineRun.started_at.desc(), PipelineRun.id.desc())
         .first()
     )
-    if run is None:
+    if row is None:
         raise ValueError("No pipeline runs found. Run discovery first.")
-    return run
+    return int(row[0]), bool(row[1])
 
 
-def businesses_for_run_query(session: Session, run: PipelineRun) -> Query[Business]:
+def businesses_for_run_query(session: Session, run_id: int, allow_revisit: bool) -> Query[Business]:
     """Return the default business scope for one pipeline run."""
-    if not run.allow_revisit:
-        return session.query(Business).filter(Business.discovery_run_id == run.id)
+    if not allow_revisit:
+        return session.query(Business).filter(Business.discovery_run_id == run_id)
 
     return session.query(Business).filter(
         or_(
-            Business.discovery_run_id == run.id,
+            Business.discovery_run_id == run_id,
             and_(
-                Business.last_seen_run_id == run.id,
+                Business.last_seen_run_id == run_id,
                 Business.eligible_for_revisit.is_(True),
             ),
         )

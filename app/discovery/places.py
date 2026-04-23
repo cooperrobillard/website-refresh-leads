@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.canonical_sites import canonical_website_key, canonical_website_url
 from app.config import GOOGLE_PLACES_API_KEY
 from app.lead_selection import normalize_website_url
-from app.models import Business, PipelineRun
+from app.models import Business
 
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 
@@ -79,7 +79,7 @@ def _apply_discovery_metadata(
     *,
     row: dict[str, Any],
     canonical_url: str | None,
-    current_run: PipelineRun,
+    current_run_id: int,
 ) -> bool:
     """Apply lightweight metadata updates when a business is seen again."""
     changed = False
@@ -110,7 +110,7 @@ def _apply_discovery_metadata(
 
     seen_at = datetime.utcnow()
     business.last_seen_at = seen_at
-    business.last_seen_run_id = current_run.id
+    business.last_seen_run_id = current_run_id
     if business.first_seen_at is None:
         business.first_seen_at = seen_at
 
@@ -122,7 +122,8 @@ def upsert_businesses(
     places: list[dict[str, Any]],
     niche: str,
     query_used: str,
-    current_run: PipelineRun,
+    current_run_id: int,
+    allow_revisit: bool = False,
 ) -> dict[str, int]:
     """Insert brand-new canonical sites and skip already-processed sites by default."""
     if not places:
@@ -174,15 +175,15 @@ def upsert_businesses(
                 existing,
                 row=row,
                 canonical_url=canonical_url,
-                current_run=current_run,
+                current_run_id=current_run_id,
             )
 
-            if existing.discovery_run_id == current_run.id:
+            if existing.discovery_run_id == current_run_id:
                 if metadata_changed:
                     counts["updated_metadata"] += 1
                 continue
 
-            if current_run.allow_revisit and existing.eligible_for_revisit:
+            if allow_revisit and existing.eligible_for_revisit:
                 if metadata_changed:
                     counts["updated_metadata"] += 1
                 continue
@@ -203,10 +204,10 @@ def upsert_businesses(
             primary_type=row["primary_type"],
             rating=row["rating"],
             review_count=row["review_count"],
-            discovery_run_id=current_run.id,
+            discovery_run_id=current_run_id,
             first_seen_at=seen_at,
             last_seen_at=seen_at,
-            last_seen_run_id=current_run.id,
+            last_seen_run_id=current_run_id,
         )
         session.add(business)
         if row["place_id"]:
