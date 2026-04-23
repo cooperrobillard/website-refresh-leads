@@ -61,6 +61,10 @@ def run_scoring(run_id: int | None = None) -> Counter[str]:
                 score_row.trust_packaging = 0
                 score_row.complexity_fit = 0
                 score_row.outreach_viability = 0
+                score_row.outreach_story_strength = 0
+                score_row.raw_total_score = 0
+                score_row.evidence_tier = "minimal"
+                score_row.evidence_cap = 0
                 score_row.total_score = 0
                 score_row.fit_status = "skip"
                 score_row.confidence = "low"
@@ -73,14 +77,18 @@ def run_scoring(run_id: int | None = None) -> Counter[str]:
             print(
                 f"{business.name} | "
                 f"status={result.fit_status} | "
-                f"score={result.total_score} | "
+                f"score={result.total_score} raw={result.raw_total_score} | "
                 f"confidence={result.confidence} | "
-                f"leg={result.scores['business_legitimacy']} "
+                f"evidence={result.evidence_tier} cap={result.evidence_cap}"
+            )
+            print(
+                f"  leg={result.scores['business_legitimacy']} "
                 f"weak={result.scores['website_weakness']} "
                 f"conv={result.scores['conversion_opportunity']} "
                 f"trust={result.scores['trust_packaging']} "
                 f"fit={result.scores['complexity_fit']} "
-                f"outreach={result.scores['outreach_viability']}"
+                f"outreach={result.scores['outreach_viability']} "
+                f"story={result.scores['outreach_story_strength']}"
             )
             if result.skip_reason:
                 print(f"  reason={result.skip_reason}")

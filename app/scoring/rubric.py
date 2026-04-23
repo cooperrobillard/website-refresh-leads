@@ -11,25 +11,38 @@ from sqlalchemy.orm import Session
 from app.crawl.page_selector import should_skip_link
 from app.lead_selection import normalize_website_url
 from app.models import Business, Note, Page, Score
-from app.scoring.rules import primary_type_blocked, website_looks_blocked
+from app.scoring.rules import (
+    franchise_or_corporate_reason,
+    primary_type_blocked,
+    website_looks_blocked,
+)
 
 
 WEIGHTS = {
     "business_legitimacy": 15,
-    "website_weakness": 25,
-    "conversion_opportunity": 20,
-    "trust_packaging": 15,
-    "complexity_fit": 15,
-    "outreach_viability": 10,
+    "website_weakness": 18,
+    "conversion_opportunity": 16,
+    "trust_packaging": 12,
+    "complexity_fit": 12,
+    "outreach_viability": 12,
+    "outreach_story_strength": 15,
 }
 
 STRONG_THRESHOLD = 75
 MAYBE_THRESHOLD = 55
 MIN_STRONG_LEGITIMACY = 12
 MIN_MAYBE_LEGITIMACY = 8
-MIN_STRONG_OPPORTUNITY = 18
+MIN_STRONG_OPPORTUNITY = 16
+MIN_STRONG_STORY = 9
+MIN_MAYBE_STORY = 5
 MIN_REVIEWS_HARD_SKIP = 2
 
+EVIDENCE_CAPS = {
+    "strong": 100,
+    "medium": 72,
+    "sparse": 60,
+    "minimal": 48,
+}
 
 TESTIMONIAL_KEYWORDS = [
     "testimonial",
@@ -82,6 +95,58 @@ CAMPAIGN_URL_HINTS = [
     "gbp-landing",
 ]
 
+VALUE_PROPOSITION_HINTS = [
+    "residential",
+    "commercial",
+    "free estimate",
+    "licensed",
+    "insured",
+    "family owned",
+    "locally owned",
+    "serving",
+    "professional",
+    "contractor",
+    "services",
+]
+
+SERVICE_STRUCTURE_HINTS = [
+    "services",
+    "our services",
+    "what we do",
+    "how we help",
+    "service area",
+]
+
+SECTION_HINTS = [
+    "about",
+    "services",
+    "testimonials",
+    "reviews",
+    "contact",
+    "get started",
+    "estimate",
+    "why choose",
+    "our process",
+]
+
+GAP_LABELS = {
+    "weak_contact_path": "Phone/contact path is not obvious.",
+    "missing_service_story": "Services are not clearly packaged on the site.",
+    "thin_trust_signals": "Trust signals and testimonials are limited.",
+    "thin_structure": "Site structure is thin and key pages are limited.",
+    "thin_home_copy": "Homepage copy is thin and the value proposition is weak.",
+    "dated_platform": "Site appears to run on a legacy or lower-polish platform.",
+}
+
+
+@dataclass
+class EvidenceAssessment:
+    """Evidence quality summary used to cap scores and set confidence."""
+
+    tier: str
+    cap: int
+    confidence: str
+
 
 @dataclass
 class ScoringResult:
@@ -90,7 +155,10 @@ class ScoringResult:
     fit_status: str
     skip_reason: str | None
     scores: dict[str, int]
+    raw_total_score: int
     total_score: int
+    evidence_tier: str
+    evidence_cap: int
     confidence: str
     top_issues: list[str]
     quick_summary: str
@@ -203,6 +271,11 @@ def homepage_text(page_map: dict[str, Page]) -> str:
     return ""
 
 
+def home_excerpt(page_map: dict[str, Page], limit: int = 800) -> str:
+    """Return the first chunk of homepage text for lightweight signal checks."""
+    return homepage_text(page_map)[:limit]
+
+
 def has_any(text: str, keywords: list[str]) -> bool:
     """Return True when any keyword appears in the text."""
     return any(keyword in text for keyword in keywords)
@@ -211,6 +284,16 @@ def has_any(text: str, keywords: list[str]) -> bool:
 def count_relevant_pages(page_map: dict[str, Page]) -> int:
     """Count the small set of page types used by the rubric."""
     return sum(1 for key in ["home", "about", "services", "contact", "gallery", "faq"] if key in page_map)
+
+
+def count_pages_with_text(page_map: dict[str, Page], minimum_length: int = 200) -> int:
+    """Count pages that have enough saved text to be useful evidence."""
+    return sum(1 for page in page_map.values() if page.raw_text and len(page.raw_text.strip()) >= minimum_length)
+
+
+def total_text_chars(page_map: dict[str, Page]) -> int:
+    """Return the total amount of saved crawl text across pages."""
+    return sum(len(page.raw_text.strip()) for page in page_map.values() if page.raw_text)
 
 
 def known_urls(
@@ -278,6 +361,120 @@ def is_campaign_landing_page(
     return any(hint in lowered for hint in CAMPAIGN_URL_HINTS)
 
 
+def _primary_type_hint(business: Business) -> str:
+    """Return the primary type in a readable lowercased form."""
+    return (business.primary_type or "").replace("_", " ").strip().lower()
+
+
+def functional_site_signals(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> dict[str, bool]:
+    """Return a compact set of brochure-site quality signals."""
+    home_text = homepage_text(page_map)
+    excerpt = home_excerpt(page_map)
+    full_text = combined_text(page_map)
+    browser_signals = report.get("homepage_signals", {})
+    primary_type_hint = _primary_type_hint(business)
+
+    clear_value_prop = bool(
+        len(excerpt) >= 220
+        and (
+            (primary_type_hint and primary_type_hint in excerpt)
+            or has_any(excerpt, VALUE_PROPOSITION_HINTS)
+        )
+    )
+    clear_contact_path = bool(
+        "contact" in page_map
+        or browser_signals.get("phone_visible", False)
+        or browser_signals.get("tel_link_present", False)
+        or browser_signals.get("cta_visible_near_top", False)
+    )
+    organized_homepage = bool(
+        len(home_text) >= 700
+        or count_relevant_pages(page_map) >= 4
+        or sum(1 for hint in SECTION_HINTS if hint in home_text) >= 2
+    )
+    service_structure = bool(
+        "services" in page_map
+        or has_any(full_text, SERVICE_STRUCTURE_HINTS)
+    )
+    review_signals = has_any(full_text, TESTIMONIAL_KEYWORDS)
+    project_proof = bool("gallery" in page_map or has_any(full_text, GALLERY_KEYWORDS))
+    trust_signals = bool(review_signals or project_proof or "about" in page_map)
+    brochure_structure = bool(
+        count_relevant_pages(page_map) >= 4
+        or sum(1 for key in ["about", "services", "contact"] if key in page_map) >= 2
+    )
+
+    return {
+        "clear_value_prop": clear_value_prop,
+        "clear_contact_path": clear_contact_path,
+        "organized_homepage": organized_homepage,
+        "service_structure": service_structure,
+        "review_signals": review_signals,
+        "project_proof": project_proof,
+        "trust_signals": trust_signals,
+        "brochure_structure": brochure_structure,
+    }
+
+
+def story_gap_labels(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> list[str]:
+    """Return the concrete story gaps that make outreach persuasive."""
+    basics = functional_site_signals(business, page_map, report)
+    gaps: list[str] = []
+
+    if not basics["clear_contact_path"]:
+        gaps.append("weak_contact_path")
+    if not basics["service_structure"]:
+        gaps.append("missing_service_story")
+    if not basics["trust_signals"]:
+        gaps.append("thin_trust_signals")
+    if not basics["brochure_structure"]:
+        gaps.append("thin_structure")
+    if len(homepage_text(page_map)) < 400:
+        gaps.append("thin_home_copy")
+    if is_google_sites_site(business, page_map, report) or has_legacy_url_pattern(business, page_map, report):
+        gaps.append("dated_platform")
+
+    return gaps
+
+
+def assess_evidence_quality(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> EvidenceAssessment:
+    """Assess evidence quality and return the deterministic score cap."""
+    browser_success = report.get("success") is True and homepage_loaded(report)
+    home_page = page_map.get("home")
+    has_saved_home = bool(home_page and home_page.raw_text)
+    relevant_pages = count_relevant_pages(page_map)
+    useful_pages = count_pages_with_text(page_map)
+    text_chars = total_text_chars(page_map)
+
+    if browser_success and has_saved_home and relevant_pages >= 4 and useful_pages >= 3 and text_chars >= 2500:
+        return EvidenceAssessment(tier="strong", cap=EVIDENCE_CAPS["strong"], confidence="high")
+
+    if browser_success and has_saved_home and relevant_pages >= 3 and useful_pages >= 2 and text_chars >= 1200:
+        return EvidenceAssessment(tier="medium", cap=EVIDENCE_CAPS["medium"], confidence="medium")
+
+    if (
+        has_homepage_evidence(business, page_map, report)
+        and (has_saved_home or browser_success)
+        and useful_pages >= 1
+        and text_chars >= 350
+    ):
+        return EvidenceAssessment(tier="sparse", cap=EVIDENCE_CAPS["sparse"], confidence="low")
+
+    return EvidenceAssessment(tier="minimal", cap=EVIDENCE_CAPS["minimal"], confidence="low")
+
+
 def detect_hard_skip(
     business: Business,
     page_map: dict[str, Page],
@@ -286,6 +483,14 @@ def detect_hard_skip(
     """Return a hard-skip reason when the business is clearly out of scope."""
     if not business.website:
         return "No real website"
+
+    franchise_reason = franchise_or_corporate_reason(
+        business_name=business.name,
+        website=" ".join(known_urls(business, page_map, report)) or business.website,
+        extra_text=combined_text(page_map),
+    )
+    if franchise_reason:
+        return franchise_reason
 
     if primary_type_blocked(business.primary_type):
         return f"Business type mismatched to offer: {business.primary_type}"
@@ -300,6 +505,9 @@ def detect_hard_skip(
     urls = " ".join(url.lower() for url in known_urls(business, page_map, report))
     if has_any(urls, HIGH_UPDATE_HINTS):
         return "Frequent-content-update or ecommerce-heavy site"
+
+    if is_campaign_landing_page(business, page_map, report):
+        return "Corporate or campaign landing page"
 
     if not has_homepage_evidence(business, page_map, report):
         return "No crawlable homepage found"
@@ -332,7 +540,7 @@ def score_business_legitimacy(
         score += 2
 
     if rating >= 4.0:
-        score += 2
+        score += 1
     if rating >= 4.5:
         score += 1
 
@@ -354,58 +562,85 @@ def score_website_weakness(
     home_text = homepage_text(page_map)
     full_text = combined_text(page_map)
     relevant_pages = count_relevant_pages(page_map)
+    basics = functional_site_signals(business, page_map, report)
+    browser_signals = report.get("homepage_signals", {})
 
-    if "services" not in page_map:
-        score += 5
+    if not basics["service_structure"]:
+        score += 4
     if "about" not in page_map:
-        score += 3
-    if "gallery" not in page_map:
-        score += 3
+        score += 2
+    if not basics["project_proof"]:
+        score += 2
     if "faq" not in page_map:
+        score += 1
+
+    if len(home_text) < 350:
+        score += 4
+    elif len(home_text) < 650:
         score += 2
 
-    if len(home_text) < 400:
-        score += 6
-    elif len(home_text) < 700:
+    if len(full_text) < 1400:
         score += 3
-
-    if len(full_text) < 1200:
-        score += 4
 
     if has_any(home_text, GENERIC_COPY_HINTS):
         score += 2
 
     if relevant_pages <= 2:
-        score += 4
+        score += 3
     elif relevant_pages == 3:
-        score += 2
+        score += 1
 
     if is_google_sites_site(business, page_map, report):
-        score += 6
+        score += 5
 
     if has_legacy_url_pattern(business, page_map, report):
+        score += 2
+
+    if browser_signals and not browser_signals.get("homepage_loaded", False):
         score += 3
 
-    signals = report.get("homepage_signals", {})
-    if signals and not signals.get("homepage_loaded", False):
-        score += 4
+    credits = 0
+    if basics["clear_value_prop"]:
+        credits += 3
+    if basics["clear_contact_path"]:
+        credits += 2
+    if basics["organized_homepage"]:
+        credits += 2
+    if basics["service_structure"]:
+        credits += 3
+    if basics["trust_signals"]:
+        credits += 2
+    if basics["brochure_structure"]:
+        credits += 3
 
+    score -= credits
     return clamp(score, 0, WEIGHTS["website_weakness"])
 
 
-def score_conversion_opportunity(page_map: dict[str, Page], report: dict) -> int:
+def score_conversion_opportunity(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> int:
     """Score missing or weak conversion paths."""
     score = 0
-    signals = report.get("homepage_signals", {})
+    basics = functional_site_signals(business, page_map, report)
+    browser_signals = report.get("homepage_signals", {})
 
     if "contact" not in page_map:
+        score += 5
+
+    if not browser_signals.get("phone_visible", False) and not browser_signals.get("tel_link_present", False):
+        score += 5
+
+    if not browser_signals.get("cta_visible_near_top", False):
         score += 6
 
-    if not signals.get("phone_visible", False) and not signals.get("tel_link_present", False):
-        score += 7
+    if basics["clear_contact_path"]:
+        score -= 4
 
-    if not signals.get("cta_visible_near_top", False):
-        score += 7
+    if basics["clear_value_prop"] and basics["service_structure"]:
+        score -= 1
 
     return clamp(score, 0, WEIGHTS["conversion_opportunity"])
 
@@ -419,26 +654,37 @@ def score_trust_packaging(
     score = 0
     text = combined_text(page_map)
     home_text = homepage_text(page_map)
+    relevant_pages = count_relevant_pages(page_map)
+    basics = functional_site_signals(business, page_map, report)
 
-    if not has_any(text, TESTIMONIAL_KEYWORDS):
-        score += 5
+    if not basics["review_signals"]:
+        score += 4
 
-    if "gallery" not in page_map and not has_any(text, GALLERY_KEYWORDS):
-        score += 5
+    if not basics["project_proof"]:
+        score += 4
 
     if business.address:
         city_hint = business.address.split(",")[0].lower()
         if city_hint and city_hint not in home_text:
-            score += 2
+            score += 1
 
     if "about" not in page_map:
-        score += 3
+        score += 2
 
-    if count_relevant_pages(page_map) <= 2:
+    if relevant_pages <= 2:
         score += 2
 
     if is_google_sites_site(business, page_map, report):
         score += 1
+
+    if basics["trust_signals"]:
+        score -= 2
+
+    if basics["brochure_structure"]:
+        score -= 1
+
+    if has_any(text, TESTIMONIAL_KEYWORDS) and has_any(text, GALLERY_KEYWORDS):
+        score -= 1
 
     return clamp(score, 0, WEIGHTS["trust_packaging"])
 
@@ -452,17 +698,21 @@ def score_complexity_fit(
     score = 0
     urls = " ".join(url.lower() for url in known_urls(business, page_map, report))
     relevant_count = count_relevant_pages(page_map)
+    basics = functional_site_signals(business, page_map, report)
 
     if relevant_count >= 3:
-        score += 5
+        score += 4
 
     if relevant_count <= 6:
-        score += 5
+        score += 4
     elif relevant_count <= 8:
-        score += 3
+        score += 2
 
     if not has_any(urls, HIGH_UPDATE_HINTS):
-        score += 5
+        score += 3
+
+    if basics["brochure_structure"]:
+        score += 1
 
     if is_campaign_landing_page(business, page_map, report):
         score -= 8
@@ -470,28 +720,78 @@ def score_complexity_fit(
     return clamp(score, 0, WEIGHTS["complexity_fit"])
 
 
-def score_outreach_viability(business: Business, page_map: dict[str, Page], report: dict) -> int:
+def score_outreach_viability(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> int:
     """Score how reachable and credible the business looks for outreach."""
     score = 0
-    signals = report.get("homepage_signals", {})
+    browser_signals = report.get("homepage_signals", {})
     page_loads = report.get("page_loads", {})
 
     if "contact" in page_map:
         score += 4
 
-    if signals.get("phone_visible", False) or signals.get("tel_link_present", False):
-        score += 2
+    if browser_signals.get("phone_visible", False) or browser_signals.get("tel_link_present", False):
+        score += 3
 
     if business.review_count and business.review_count >= 8:
         score += 2
 
+    if business.review_count and business.review_count >= 20:
+        score += 1
+
     if business.address:
         score += 1
 
-    if page_loads.get("home", False):
+    if page_loads.get("home", False) or homepage_loaded(report):
         score += 1
 
     return clamp(score, 0, WEIGHTS["outreach_viability"])
+
+
+def score_outreach_story_strength(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> int:
+    """Score whether the outreach narrative is obvious, fair, and worth sending."""
+    score = 0
+    gaps = story_gap_labels(business, page_map, report)
+    basics = functional_site_signals(business, page_map, report)
+
+    if len(gaps) >= 2:
+        score += 6
+    elif len(gaps) == 1:
+        score += 3
+
+    if len(gaps) >= 4:
+        score += 3
+    elif len(gaps) == 3:
+        score += 1
+
+    if business.review_count and business.review_count >= 8:
+        score += 3
+
+    if business.review_count and business.review_count >= 20:
+        score += 1
+
+    if business.address:
+        score += 1
+
+    if homepage_loaded(report):
+        score += 1
+
+    if basics["brochure_structure"] and basics["clear_contact_path"] and len(gaps) <= 1:
+        score -= 4
+    elif basics["brochure_structure"] and len(gaps) == 2:
+        score -= 1
+
+    if basics["clear_value_prop"] and basics["service_structure"] and len(gaps) <= 1:
+        score -= 2
+
+    return clamp(score, 0, WEIGHTS["outreach_story_strength"])
 
 
 def build_top_issues(
@@ -500,30 +800,7 @@ def build_top_issues(
     report: dict[str, object],
 ) -> list[str]:
     """Build a short list of concrete site issues to mention in notes."""
-    issues = []
-    signals = report.get("homepage_signals", {})
-    text = combined_text(page_map)
-
-    if not signals.get("cta_visible_near_top", False):
-        issues.append("Homepage CTA is weak or buried.")
-
-    if not signals.get("phone_visible", False) and not signals.get("tel_link_present", False):
-        issues.append("Phone/contact path is not obvious.")
-
-    if "services" not in page_map:
-        issues.append("Services are not clearly packaged on the site.")
-
-    if not has_any(text, TESTIMONIAL_KEYWORDS):
-        issues.append("Trust signals and testimonials are limited.")
-
-    if "gallery" not in page_map and not has_any(text, GALLERY_KEYWORDS):
-        issues.append("Project proof is underused or hard to find.")
-
-    if count_relevant_pages(page_map) <= 2:
-        issues.append("Site structure is thin and key pages are limited.")
-
-    if is_google_sites_site(business, page_map, report) or has_legacy_url_pattern(business, page_map, report):
-        issues.append("Site appears to run on a legacy or lower-polish platform.")
+    issues = [GAP_LABELS[label] for label in story_gap_labels(business, page_map, report)]
 
     if not issues:
         issues.append("Website looks usable, but the redesign opportunity is less obvious.")
@@ -531,18 +808,32 @@ def build_top_issues(
     return issues[:3]
 
 
-def build_quick_summary(business: Business, fit_status: str, total_score: int) -> str:
+def build_quick_summary(
+    business: Business,
+    fit_status: str,
+    total_score: int,
+    raw_total_score: int,
+    evidence_tier: str,
+) -> str:
     """Build a short summary that matches the final classification."""
     reviews = business.review_count or 0
     rating = business.rating or 0
-    if fit_status == "strong":
-        tail = "the business looks legitimate and the site shows clear redesign and conversion upside."
-    elif fit_status == "maybe":
-        tail = "the business looks legitimate and the site shows some refresh opportunity, but the case is less decisive."
-    else:
-        tail = "the business looks legitimate, but the current evidence suggests limited redesign or outreach upside."
 
-    return f"{business.name} is a {fit_status} lead with a total score of {total_score}. It has {reviews} reviews, a {rating} rating, and {tail}"
+    if fit_status == "strong":
+        tail = "the business looks legitimate and the outreach story is easy to justify."
+    elif fit_status == "maybe":
+        tail = "the business looks legitimate and there is some outreach upside, but the case is not decisive."
+    else:
+        tail = "the current evidence suggests limited or lower-confidence outreach upside."
+
+    cap_note = ""
+    if total_score < raw_total_score:
+        cap_note = f" Evidence quality is {evidence_tier}, so the score is capped from {raw_total_score} to {total_score}."
+
+    return (
+        f"{business.name} is a {fit_status} lead with a total score of {total_score}. "
+        f"It has {reviews} reviews, a {rating} rating, and {tail}{cap_note}"
+    )
 
 
 def build_teardown_angle(fit_status: str, top_issues: list[str]) -> str:
@@ -558,15 +849,21 @@ def classify_total_score(total_score: int, scores: dict[str, int]) -> str:
     """Map the numeric score into strong, maybe, or skip."""
     legitimacy = scores["business_legitimacy"]
     redesign_opportunity = opportunity_score(scores)
+    story_strength = scores["outreach_story_strength"]
 
     if (
         total_score >= STRONG_THRESHOLD
         and legitimacy >= MIN_STRONG_LEGITIMACY
         and redesign_opportunity >= MIN_STRONG_OPPORTUNITY
+        and story_strength >= MIN_STRONG_STORY
     ):
         return "strong"
 
-    if total_score >= MAYBE_THRESHOLD and legitimacy >= MIN_MAYBE_LEGITIMACY:
+    if (
+        total_score >= MAYBE_THRESHOLD
+        and legitimacy >= MIN_MAYBE_LEGITIMACY
+        and story_strength >= MIN_MAYBE_STORY
+    ):
         return "maybe"
 
     return "skip"
@@ -576,6 +873,7 @@ def evaluate_business(session: Session, business: Business) -> ScoringResult:
     """Evaluate one business using the current deterministic rubric."""
     page_map = get_pages(session, business)
     report = load_browser_report(business)
+    evidence = assess_evidence_quality(business, page_map, report)
 
     hard_skip_reason = detect_hard_skip(business, page_map, report)
     if hard_skip_reason:
@@ -583,7 +881,10 @@ def evaluate_business(session: Session, business: Business) -> ScoringResult:
             fit_status="skip",
             skip_reason=hard_skip_reason,
             scores={key: 0 for key in WEIGHTS},
+            raw_total_score=0,
             total_score=0,
+            evidence_tier=evidence.tier,
+            evidence_cap=evidence.cap,
             confidence="high",
             top_issues=[hard_skip_reason],
             quick_summary=f"{business.name} is a skip lead. {hard_skip_reason}.",
@@ -593,34 +894,45 @@ def evaluate_business(session: Session, business: Business) -> ScoringResult:
     scores = {
         "business_legitimacy": score_business_legitimacy(business, page_map, report),
         "website_weakness": score_website_weakness(business, page_map, report),
-        "conversion_opportunity": score_conversion_opportunity(page_map, report),
+        "conversion_opportunity": score_conversion_opportunity(business, page_map, report),
         "trust_packaging": score_trust_packaging(business, page_map, report),
         "complexity_fit": score_complexity_fit(business, page_map, report),
         "outreach_viability": score_outreach_viability(business, page_map, report),
+        "outreach_story_strength": score_outreach_story_strength(business, page_map, report),
     }
 
-    total_score = sum(scores.values())
+    raw_total_score = sum(scores.values())
+    total_score = min(raw_total_score, evidence.cap)
     fit_status = classify_total_score(total_score, scores)
     top_issues = build_top_issues(business, page_map, report)
 
-    confidence = "medium"
-    if not page_map and homepage_loaded(report):
-        confidence = "low"
-    elif "home" not in page_map and has_homepage_evidence(business, page_map, report):
-        confidence = "low"
-    elif count_relevant_pages(page_map) >= 4 and report.get("success") is True:
-        confidence = "high"
-    elif count_relevant_pages(page_map) <= 2 or report.get("success") is False:
-        confidence = "low"
+    skip_reason = None
+    if fit_status == "skip":
+        if total_score < raw_total_score:
+            skip_reason = (
+                "Score below review threshold after evidence cap: "
+                f"raw={raw_total_score} capped={total_score} tier={evidence.tier}"
+            )
+        else:
+            skip_reason = f"Score below review threshold: {total_score}"
 
     return ScoringResult(
         fit_status=fit_status,
-        skip_reason=None if fit_status != "skip" else f"Score below review threshold: {total_score}",
+        skip_reason=skip_reason,
         scores=scores,
+        raw_total_score=raw_total_score,
         total_score=total_score,
-        confidence=confidence,
+        evidence_tier=evidence.tier,
+        evidence_cap=evidence.cap,
+        confidence=evidence.confidence,
         top_issues=top_issues,
-        quick_summary=build_quick_summary(business, fit_status, total_score),
+        quick_summary=build_quick_summary(
+            business,
+            fit_status,
+            total_score,
+            raw_total_score,
+            evidence.tier,
+        ),
         teardown_angle=build_teardown_angle(fit_status, top_issues),
     )
 
@@ -638,6 +950,10 @@ def upsert_score_and_note(session: Session, business: Business, result: ScoringR
     score_row.trust_packaging = result.scores["trust_packaging"]
     score_row.complexity_fit = result.scores["complexity_fit"]
     score_row.outreach_viability = result.scores["outreach_viability"]
+    score_row.outreach_story_strength = result.scores["outreach_story_strength"]
+    score_row.raw_total_score = result.raw_total_score
+    score_row.evidence_tier = result.evidence_tier
+    score_row.evidence_cap = result.evidence_cap
     score_row.total_score = result.total_score
     score_row.fit_status = result.fit_status
     score_row.confidence = result.confidence

@@ -128,7 +128,11 @@ class Score(Base):
     trust_packaging: Mapped[int | None] = mapped_column(Integer, nullable=True)
     complexity_fit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     outreach_viability: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outreach_story_strength: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    raw_total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_tier: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    evidence_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fit_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)

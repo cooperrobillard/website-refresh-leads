@@ -29,6 +29,13 @@ BUSINESS_COLUMN_STATEMENTS = {
     ),
 }
 
+SCORE_COLUMN_STATEMENTS = {
+    "outreach_story_strength": "ALTER TABLE scores ADD COLUMN outreach_story_strength INTEGER",
+    "raw_total_score": "ALTER TABLE scores ADD COLUMN raw_total_score INTEGER",
+    "evidence_tier": "ALTER TABLE scores ADD COLUMN evidence_tier VARCHAR(20)",
+    "evidence_cap": "ALTER TABLE scores ADD COLUMN evidence_cap INTEGER",
+}
+
 
 def _is_sqlite_database() -> bool:
     """Return True when the configured database is a local SQLite file."""
@@ -82,6 +89,18 @@ def _ensure_sqlite_business_columns() -> None:
 
         existing_columns = _column_names(connection, "businesses")
         for column_name, statement in BUSINESS_COLUMN_STATEMENTS.items():
+            if column_name not in existing_columns:
+                connection.execute(text(statement))
+
+
+def _ensure_sqlite_score_columns() -> None:
+    """Add missing SQLite score columns for lightweight schema upgrades."""
+    with engine.begin() as connection:
+        if not _table_exists(connection, "scores"):
+            return
+
+        existing_columns = _column_names(connection, "scores")
+        for column_name, statement in SCORE_COLUMN_STATEMENTS.items():
             if column_name not in existing_columns:
                 connection.execute(text(statement))
 
@@ -167,6 +186,43 @@ def _backfill_existing_businesses() -> dict[str, int]:
     }
 
 
+def _backfill_existing_scores() -> int:
+    """Populate new score fields for legacy rows until they are rescored."""
+    from app.models import Score
+
+    touched = 0
+
+    with SessionLocal() as session:
+        score_rows = session.query(Score).all()
+
+        for score_row in score_rows:
+            changed = False
+
+            if score_row.raw_total_score is None and score_row.total_score is not None:
+                score_row.raw_total_score = score_row.total_score
+                changed = True
+
+            if score_row.evidence_cap is None and score_row.total_score is not None:
+                score_row.evidence_cap = score_row.total_score
+                changed = True
+
+            if score_row.evidence_tier is None:
+                score_row.evidence_tier = "unknown"
+                changed = True
+
+            if score_row.outreach_story_strength is None:
+                score_row.outreach_story_strength = 0
+                changed = True
+
+            if changed:
+                touched += 1
+
+        if touched:
+            session.commit()
+
+    return touched
+
+
 def ensure_database_schema() -> None:
     """Create tables and apply the small SQLite upgrades this MVP needs."""
     from app import models  # noqa: F401
@@ -177,7 +233,9 @@ def ensure_database_schema() -> None:
         return
 
     _ensure_sqlite_business_columns()
+    _ensure_sqlite_score_columns()
     backfill_result = _backfill_existing_businesses()
+    score_backfill_count = _backfill_existing_scores()
     _ensure_sqlite_indexes()
 
     if backfill_result["touched"]:
@@ -195,6 +253,13 @@ def ensure_database_schema() -> None:
                 "If you want a completely clean history after this schema change, "
                 "do a one-time database reset."
             )
+
+    if score_backfill_count:
+        print(
+            "Schema update: "
+            f"backfilled {score_backfill_count} existing score entr"
+            f"{'y' if score_backfill_count == 1 else 'ies'}."
+        )
 
 
 def reset_sqlite_database() -> Path:
