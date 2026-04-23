@@ -18,9 +18,8 @@ from app.models import Artifact, Business, Note, Page, Score
 from app.pipeline_runs import resolve_pipeline_run
 
 
-EXPORT_DIR = Path("data/exports")
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-EXPORT_SCREENSHOT_DIR = EXPORT_DIR / "review_screenshots"
+EXPORT_ROOT = Path("data/exports")
+EXPORT_RUNS_DIR = EXPORT_ROOT / "runs"
 
 PAGE_TYPES = ["home", "about", "services", "contact", "gallery", "faq"]
 ARTIFACT_TYPES = {
@@ -110,6 +109,29 @@ def slugify(value: str) -> str:
     slug = "".join(char.lower() if char.isalnum() else "-" for char in value)
     parts = [part for part in slug.split("-") if part]
     return "-".join(parts) or "business"
+
+
+def ensure_export_root() -> None:
+    """Ensure the root export folders exist."""
+    EXPORT_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def run_export_directory(run_id: int) -> Path:
+    """Return the durable export folder for one pipeline run."""
+    ensure_export_root()
+    return EXPORT_RUNS_DIR / f"run_{run_id}"
+
+
+def run_export_paths(run_id: int) -> tuple[Path, Path, Path, Path]:
+    """Return the per-run export directory plus its JSON, CSV, and screenshot paths."""
+    export_dir = run_export_directory(run_id)
+    screenshot_dir = export_dir / "review_screenshots"
+    return (
+        export_dir,
+        export_dir / "review_package.json",
+        export_dir / "review_package.csv",
+        screenshot_dir,
+    )
 
 
 def build_page_maps(rows: list[Page]) -> dict[int, dict[str, str | None]]:
@@ -330,9 +352,9 @@ def copy_screenshot_for_export(
     return destination.as_posix()
 
 
-def collect_export_screenshots(records: list[dict[str, Any]]) -> int:
+def collect_export_screenshots(records: list[dict[str, Any]], screenshot_dir: Path) -> int:
     """Copy screenshots for exported leads into a clean export bundle."""
-    recreate_export_directory(EXPORT_SCREENSHOT_DIR)
+    recreate_export_directory(screenshot_dir)
 
     copied_count = 0
     used_filenames: set[str] = set()
@@ -346,7 +368,7 @@ def collect_export_screenshots(records: list[dict[str, Any]]) -> int:
                 business_id=record["business_id"],
                 variant=variant,
                 source_path=record["screenshots"].get(screenshot_key),
-                export_dir=EXPORT_SCREENSHOT_DIR,
+                export_dir=screenshot_dir,
                 used_filenames=used_filenames,
             )
             export_screenshots[screenshot_key] = export_path
@@ -461,6 +483,8 @@ def export_review_package(
 
     with SessionLocal() as session:
         current_run_id, _ = resolve_pipeline_run(session, run_id)
+        export_dir, json_path, csv_path, screenshot_dir = run_export_paths(current_run_id)
+        export_dir.mkdir(parents=True, exist_ok=True)
         query = (
             current_run_new_businesses_query(session, current_run_id)
             .with_entities(Business, Score, Note)
@@ -530,12 +554,10 @@ def export_review_package(
             )
             for business, score, note in rows
         ]
-        copied_screenshot_count = collect_export_screenshots(records)
+        copied_screenshot_count = collect_export_screenshots(records, screenshot_dir)
 
-        json_path = EXPORT_DIR / "review_package.json"
         json_path.write_text(json.dumps(records, indent=2), encoding="utf-8")
 
-        csv_path = EXPORT_DIR / "review_package.csv"
         write_csv(records, csv_path)
 
         strong_count = sum(1 for record in records if record["fit_status"] == "strong")
@@ -547,10 +569,11 @@ def export_review_package(
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
         print(f"Strong: {strong_count}")
         print(f"Maybe: {maybe_count}")
+        print(f"Run export folder: {export_dir}")
         print(f"JSON: {json_path}")
         print(f"CSV:  {csv_path}")
         print(f"Copied screenshots: {copied_screenshot_count}")
-        print(f"Screenshot export folder: {EXPORT_SCREENSHOT_DIR}")
+        print(f"Screenshot export folder: {screenshot_dir}")
 
         return records
 

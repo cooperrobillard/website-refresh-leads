@@ -22,11 +22,13 @@ class PipelineRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     allow_revisit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     run_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scoring_mode: Mapped[str] = mapped_column(String(30), default="model_judge", nullable=False)
 
     discovered_businesses: Mapped[list["Business"]] = relationship(
         back_populates="discovery_run",
         foreign_keys="Business.discovery_run_id",
     )
+    model_judgments: Mapped[list["ModelJudgment"]] = relationship(back_populates="pipeline_run")
 
 
 class Business(Base):
@@ -52,6 +54,8 @@ class Business(Base):
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     review_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    prefilter_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    prefilter_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     fit_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -74,6 +78,10 @@ class Business(Base):
     artifacts: Mapped[list["Artifact"]] = relationship(back_populates="business", cascade="all, delete-orphan")
     score: Mapped["Score | None"] = relationship(back_populates="business", uselist=False, cascade="all, delete-orphan")
     note: Mapped["Note | None"] = relationship(back_populates="business", uselist=False, cascade="all, delete-orphan")
+    model_judgments: Mapped[list["ModelJudgment"]] = relationship(
+        back_populates="business",
+        cascade="all, delete-orphan",
+    )
 
 
 class Page(Base):
@@ -154,3 +162,41 @@ class Note(Base):
     final_memo: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     business: Mapped["Business"] = relationship(back_populates="note")
+
+
+class ModelJudgment(Base):
+    """Compact storage for model-driven lead judgments and fallback scaffolding."""
+
+    __tablename__ = "model_judgments"
+    __table_args__ = (
+        UniqueConstraint(
+            "business_id",
+            "pipeline_run_id",
+            "judgment_mode",
+            name="uq_model_judgments_business_run_mode",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id"), nullable=False)
+    pipeline_run_id: Mapped[int] = mapped_column(ForeignKey("pipeline_runs.id"), nullable=False)
+
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    response_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    judgment_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    fit_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    evidence_quality: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    business_legitimacy: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    website_weakness: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    outreach_story_strength: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    recommended_action: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    top_issues: Mapped[str | None] = mapped_column(Text, nullable=True)
+    short_teardown_angle: Mapped[str | None] = mapped_column(Text, nullable=True)
+    short_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business: Mapped["Business"] = relationship(back_populates="model_judgments")
+    pipeline_run: Mapped["PipelineRun"] = relationship(back_populates="model_judgments")

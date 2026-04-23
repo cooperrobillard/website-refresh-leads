@@ -1,4 +1,4 @@
-"""Review stored prefilter classifications for saved businesses."""
+"""Review stored deterministic prefilter classifications for saved businesses."""
 
 from __future__ import annotations
 
@@ -36,7 +36,3 @@ def main() -> None:
                 f"status={fit_status} | "
                 f"reason={skip_reason}"
             )
-
-
-if __name__ == "__main__":
-    main()

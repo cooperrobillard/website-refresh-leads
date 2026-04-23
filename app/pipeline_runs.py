@@ -18,6 +18,7 @@ def create_pipeline_run(
     niche: str,
     allow_revisit: bool = False,
     run_label: str | None = None,
+    scoring_mode: str = "model_judge",
 ) -> int:
     """Insert one pipeline run row and return its id."""
     run = PipelineRun(
@@ -25,6 +26,7 @@ def create_pipeline_run(
         niche=niche,
         allow_revisit=allow_revisit,
         run_label=run_label,
+        scoring_mode=scoring_mode,
     )
     session.add(run)
     session.flush()
@@ -39,6 +41,7 @@ def start_pipeline_run(
     niche: str,
     allow_revisit: bool = False,
     run_label: str | None = None,
+    scoring_mode: str = "model_judge",
 ) -> int:
     """Create a pipeline run using a short-lived session and return its id."""
     with SessionLocal() as session:
@@ -48,6 +51,7 @@ def start_pipeline_run(
             niche=niche,
             allow_revisit=allow_revisit,
             run_label=run_label,
+            scoring_mode=scoring_mode,
         )
 
 

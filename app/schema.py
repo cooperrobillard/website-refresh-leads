@@ -14,6 +14,8 @@ from app.db import Base, SessionLocal, engine
 BUSINESS_COLUMN_STATEMENTS = {
     "canonical_key": "ALTER TABLE businesses ADD COLUMN canonical_key VARCHAR(500)",
     "canonical_url": "ALTER TABLE businesses ADD COLUMN canonical_url VARCHAR(500)",
+    "prefilter_status": "ALTER TABLE businesses ADD COLUMN prefilter_status VARCHAR(20)",
+    "prefilter_reason": "ALTER TABLE businesses ADD COLUMN prefilter_reason TEXT",
     "discovery_run_id": (
         "ALTER TABLE businesses ADD COLUMN discovery_run_id "
         "INTEGER REFERENCES pipeline_runs(id)"
@@ -26,6 +28,13 @@ BUSINESS_COLUMN_STATEMENTS = {
     ),
     "eligible_for_revisit": (
         "ALTER TABLE businesses ADD COLUMN eligible_for_revisit BOOLEAN NOT NULL DEFAULT 0"
+    ),
+}
+
+PIPELINE_RUN_COLUMN_STATEMENTS = {
+    "scoring_mode": (
+        "ALTER TABLE pipeline_runs ADD COLUMN scoring_mode "
+        "VARCHAR(30) NOT NULL DEFAULT 'model_judge'"
     ),
 }
 
@@ -93,6 +102,18 @@ def _ensure_sqlite_business_columns() -> None:
                 connection.execute(text(statement))
 
 
+def _ensure_sqlite_pipeline_run_columns() -> None:
+    """Add missing SQLite pipeline run columns for lightweight schema upgrades."""
+    with engine.begin() as connection:
+        if not _table_exists(connection, "pipeline_runs"):
+            return
+
+        existing_columns = _column_names(connection, "pipeline_runs")
+        for column_name, statement in PIPELINE_RUN_COLUMN_STATEMENTS.items():
+            if column_name not in existing_columns:
+                connection.execute(text(statement))
+
+
 def _ensure_sqlite_score_columns() -> None:
     """Add missing SQLite score columns for lightweight schema upgrades."""
     with engine.begin() as connection:
@@ -152,6 +173,14 @@ def _backfill_existing_businesses() -> dict[str, int]:
                 business.canonical_url = derived_canonical_url
                 changed = True
 
+            if business.prefilter_status is None and business.fit_status is not None:
+                business.prefilter_status = business.fit_status
+                changed = True
+
+            if business.prefilter_reason is None and business.skip_reason is not None:
+                business.prefilter_reason = business.skip_reason
+                changed = True
+
             if business.first_seen_at is None:
                 business.first_seen_at = business.created_at
                 changed = True
@@ -184,6 +213,28 @@ def _backfill_existing_businesses() -> dict[str, int]:
         "touched": touched,
         "legacy_duplicate_sites": legacy_duplicate_sites,
     }
+
+
+def _backfill_existing_pipeline_runs() -> int:
+    """Mark legacy runs as deterministic when they predate scoring-mode tracking."""
+    from app.models import PipelineRun
+
+    touched = 0
+
+    with SessionLocal() as session:
+        runs = session.query(PipelineRun).all()
+
+        for pipeline_run in runs:
+            if pipeline_run.scoring_mode:
+                continue
+
+            pipeline_run.scoring_mode = "deterministic"
+            touched += 1
+
+        if touched:
+            session.commit()
+
+    return touched
 
 
 def _backfill_existing_scores() -> int:
@@ -233,8 +284,10 @@ def ensure_database_schema() -> None:
         return
 
     _ensure_sqlite_business_columns()
+    _ensure_sqlite_pipeline_run_columns()
     _ensure_sqlite_score_columns()
     backfill_result = _backfill_existing_businesses()
+    pipeline_run_backfill_count = _backfill_existing_pipeline_runs()
     score_backfill_count = _backfill_existing_scores()
     _ensure_sqlite_indexes()
 
@@ -259,6 +312,13 @@ def ensure_database_schema() -> None:
             "Schema update: "
             f"backfilled {score_backfill_count} existing score entr"
             f"{'y' if score_backfill_count == 1 else 'ies'}."
+        )
+
+    if pipeline_run_backfill_count:
+        print(
+            "Schema update: "
+            f"backfilled {pipeline_run_backfill_count} existing pipeline run entr"
+            f"{'y' if pipeline_run_backfill_count == 1 else 'ies'}."
         )
 
 

@@ -12,7 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Business, Note, Page, Score
+from app.models import Artifact, Business, Note, Page, Score
 from app.pipeline_runs import create_pipeline_run
 from app.reports import export_review_package as export_module
 
@@ -30,9 +30,8 @@ class ExportReviewPackageTests(unittest.TestCase):
 
     def test_export_only_includes_current_run_new_candidates(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            export_dir = Path(temp_dir) / "exports"
-            export_dir.mkdir(parents=True, exist_ok=True)
-            screenshot_dir = export_dir / "review_screenshots"
+            export_runs_dir = Path(temp_dir) / "exports" / "runs"
+            export_runs_dir.mkdir(parents=True, exist_ok=True)
 
             with self.Session() as session:
                 first_run_id = create_pipeline_run(session, query="painters lowell ma", niche="painters")
@@ -140,9 +139,9 @@ class ExportReviewPackageTests(unittest.TestCase):
 
             with patch.object(export_module, "SessionLocal", self.Session), patch.object(
                 export_module,
-                "EXPORT_DIR",
-                export_dir,
-            ), patch.object(export_module, "EXPORT_SCREENSHOT_DIR", screenshot_dir):
+                "EXPORT_RUNS_DIR",
+                export_runs_dir,
+            ):
                 records = export_module.export_review_package(
                     limit=10,
                     include_maybe=True,
@@ -174,16 +173,21 @@ class ExportReviewPackageTests(unittest.TestCase):
                 ["Thin trust signals", "Dated brochure presentation"],
             )
 
-            json_path = export_dir / "review_package.json"
+            run_export_dir = export_runs_dir / f"run_{second_run_id}"
+            json_path = run_export_dir / "review_package.json"
+            csv_path = run_export_dir / "review_package.csv"
+            screenshot_dir = run_export_dir / "review_screenshots"
+            self.assertTrue(run_export_dir.exists())
             self.assertTrue(json_path.exists())
+            self.assertTrue(csv_path.exists())
+            self.assertTrue(screenshot_dir.exists())
             exported_records = json.loads(json_path.read_text(encoding="utf-8"))
             self.assertEqual([row["business_name"] for row in exported_records], ["New Acme Painting"])
 
     def test_export_skip_fallback_stays_with_current_run_candidates(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            export_dir = Path(temp_dir) / "exports"
-            export_dir.mkdir(parents=True, exist_ok=True)
-            screenshot_dir = export_dir / "review_screenshots"
+            export_runs_dir = Path(temp_dir) / "exports" / "runs"
+            export_runs_dir.mkdir(parents=True, exist_ok=True)
 
             with self.Session() as session:
                 first_run_id = create_pipeline_run(session, query="painters lowell ma", niche="painters")
@@ -261,9 +265,9 @@ class ExportReviewPackageTests(unittest.TestCase):
 
             with patch.object(export_module, "SessionLocal", self.Session), patch.object(
                 export_module,
-                "EXPORT_DIR",
-                export_dir,
-            ), patch.object(export_module, "EXPORT_SCREENSHOT_DIR", screenshot_dir):
+                "EXPORT_RUNS_DIR",
+                export_runs_dir,
+            ):
                 records = export_module.export_review_package(
                     limit=10,
                     include_maybe=True,
@@ -274,6 +278,117 @@ class ExportReviewPackageTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["business_name"], "Current Skip Lead")
             self.assertEqual(records[0]["fit_status"], "skip")
+
+    def test_exports_for_two_runs_use_different_folders_and_keep_screenshots(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            export_runs_dir = Path(temp_dir) / "exports" / "runs"
+            export_runs_dir.mkdir(parents=True, exist_ok=True)
+            source_dir = Path(temp_dir) / "source_screens"
+            source_dir.mkdir(parents=True, exist_ok=True)
+
+            desktop_source = source_dir / "desktop.png"
+            mobile_source = source_dir / "mobile.png"
+            desktop_source.write_bytes(b"desktop")
+            mobile_source.write_bytes(b"mobile")
+
+            with self.Session() as session:
+                first_run_id = create_pipeline_run(session, query="painters lowell ma", niche="painters")
+                second_run_id = create_pipeline_run(session, query="painters chelmsford ma", niche="painters")
+
+                first_business = Business(
+                    name="Acme Painting",
+                    niche="painters",
+                    query_used="painters lowell ma",
+                    website="https://acme-lowell.example.com",
+                    canonical_url="https://acme-lowell.example.com",
+                    canonical_key="acme-lowell.example.com",
+                    address="Lowell, MA",
+                    primary_type="painter",
+                    rating=4.8,
+                    review_count=21,
+                    fit_status="maybe",
+                    discovery_run_id=first_run_id,
+                )
+                second_business = Business(
+                    name="Acme Painting",
+                    niche="painters",
+                    query_used="painters chelmsford ma",
+                    website="https://acme-chelmsford.example.com",
+                    canonical_url="https://acme-chelmsford.example.com",
+                    canonical_key="acme-chelmsford.example.com",
+                    address="Chelmsford, MA",
+                    primary_type="painter",
+                    rating=4.7,
+                    review_count=19,
+                    fit_status="maybe",
+                    discovery_run_id=second_run_id,
+                )
+                session.add_all([first_business, second_business])
+                session.flush()
+
+                for business in [first_business, second_business]:
+                    session.add(
+                        Score(
+                            business_id=business.id,
+                            business_legitimacy=14,
+                            website_weakness=4,
+                            conversion_opportunity=3,
+                            trust_packaging=4,
+                            complexity_fit=12,
+                            outreach_viability=10,
+                            outreach_story_strength=7,
+                            raw_total_score=54,
+                            evidence_tier="medium",
+                            evidence_cap=72,
+                            total_score=54,
+                            fit_status="maybe",
+                            confidence="medium",
+                        )
+                    )
+                    session.add(
+                        Artifact(
+                            business_id=business.id,
+                            artifact_type="desktop_home_screenshot",
+                            file_path=desktop_source.as_posix(),
+                        )
+                    )
+                    session.add(
+                        Artifact(
+                            business_id=business.id,
+                            artifact_type="mobile_home_screenshot",
+                            file_path=mobile_source.as_posix(),
+                        )
+                    )
+                session.commit()
+
+            with patch.object(export_module, "SessionLocal", self.Session), patch.object(
+                export_module,
+                "EXPORT_RUNS_DIR",
+                export_runs_dir,
+            ):
+                first_records = export_module.export_review_package(limit=10, include_maybe=True, run_id=first_run_id)
+                second_records = export_module.export_review_package(limit=10, include_maybe=True, run_id=second_run_id)
+
+            self.assertEqual(len(first_records), 1)
+            self.assertEqual(len(second_records), 1)
+
+            first_dir = export_runs_dir / f"run_{first_run_id}"
+            second_dir = export_runs_dir / f"run_{second_run_id}"
+            self.assertNotEqual(first_dir, second_dir)
+            self.assertTrue((first_dir / "review_package.json").exists())
+            self.assertTrue((second_dir / "review_package.json").exists())
+
+            first_screenshot_dir = first_dir / "review_screenshots"
+            second_screenshot_dir = second_dir / "review_screenshots"
+            self.assertTrue(first_screenshot_dir.exists())
+            self.assertTrue(second_screenshot_dir.exists())
+
+            first_files = sorted(path.name for path in first_screenshot_dir.iterdir())
+            second_files = sorted(path.name for path in second_screenshot_dir.iterdir())
+            self.assertEqual(first_files, ["acme-painting_desktop.png", "acme-painting_mobile.png"])
+            self.assertEqual(second_files, ["acme-painting_desktop.png", "acme-painting_mobile.png"])
+            self.assertTrue((first_screenshot_dir / "acme-painting_desktop.png").exists())
+            self.assertTrue((second_screenshot_dir / "acme-painting_desktop.png").exists())
 
 
 if __name__ == "__main__":

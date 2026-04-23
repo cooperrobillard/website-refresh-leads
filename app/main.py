@@ -8,10 +8,10 @@ from pathlib import Path
 from app.browser.run_browser_checks import run_browser_validation
 from app.crawl.run_crawl import run_crawl
 from app.discovery.run_places import positive_int, run_places_query
+from app.judging.runner import run_final_judgment
 from app.pipeline_runs import finish_pipeline_run, start_pipeline_run
 from app.reports.export_review_package import export_review_package
 from app.scoring.run_prefilter import run_prefilter
-from app.scoring.run_scoring import run_scoring
 from app.schema import ensure_database_schema
 
 
@@ -46,6 +46,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Allow businesses already marked eligible_for_revisit to re-enter the run. "
             "Default: false."
+        ),
+    )
+    parser.add_argument(
+        "--scoring-mode",
+        choices=["deterministic", "model_judge", "compare"],
+        default="model_judge",
+        help=(
+            "Final lead judgment path to run. "
+            "Default: model_judge."
         ),
     )
     return parser.parse_args()
@@ -103,6 +112,7 @@ def run_pipeline_for_query(
     page_size: int,
     max_pages: int,
     allow_revisit: bool = False,
+    scoring_mode: str = "model_judge",
 ) -> None:
     """Run the full sequential pipeline for one query/niche pair."""
     print(f"Query: {query}")
@@ -111,8 +121,11 @@ def run_pipeline_for_query(
         query=query,
         niche=niche,
         allow_revisit=allow_revisit,
+        scoring_mode=scoring_mode,
     )
-    print(f"Run ID: {current_run_id} | allow_revisit={allow_revisit}")
+    print(
+        f"Run ID: {current_run_id} | allow_revisit={allow_revisit} | scoring_mode={scoring_mode}"
+    )
 
     try:
         print("\n[1/6] Discovery")
@@ -133,8 +146,8 @@ def run_pipeline_for_query(
         print("\n[4/6] Browser Checks")
         run_browser_validation(run_id=current_run_id)
 
-        print("\n[5/6] Scoring")
-        run_scoring(run_id=current_run_id)
+        print("\n[5/6] Final Judgment")
+        run_final_judgment(run_id=current_run_id, scoring_mode=scoring_mode)
 
         print("\n[6/6] Export Review Package")
         export_review_package(limit=20, include_maybe=True, run_id=current_run_id)
@@ -163,6 +176,7 @@ def main() -> None:
             page_size=args.page_size,
             max_pages=args.max_pages,
             allow_revisit=args.allow_revisit,
+            scoring_mode=args.scoring_mode,
         )
 
     print("\nPipeline run complete.")

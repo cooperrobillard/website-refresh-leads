@@ -15,8 +15,8 @@ from app.crawl.crawler import crawl_business_site
 def run_crawl(run_id: int | None = None) -> dict[str, int]:
     """Run the crawl phase for current-run businesses that passed the prefilter."""
     status_order = case(
-        (Business.fit_status == "strong", 0),
-        (Business.fit_status == "maybe", 1),
+        (Business.prefilter_status == "strong", 0),
+        (Business.prefilter_status == "maybe", 1),
         else_=2,
     )
 
@@ -26,7 +26,7 @@ def run_crawl(run_id: int | None = None) -> dict[str, int]:
         failure_count = 0
         queried_businesses = (
             businesses_for_run_query(session, current_run_id, allow_revisit)
-            .filter(Business.fit_status.in_(["strong", "maybe"]))
+            .filter(Business.prefilter_status.in_(["strong", "maybe"]))
             .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
         )

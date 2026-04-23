@@ -18,8 +18,8 @@ from app.browser.screenshots import capture_homepage_screenshots
 def run_browser_validation(run_id: int | None = None) -> Counter[str]:
     """Run screenshot capture and browser checks for current-run businesses."""
     status_order = case(
-        (Business.fit_status == "strong", 0),
-        (Business.fit_status == "maybe", 1),
+        (Business.prefilter_status == "strong", 0),
+        (Business.prefilter_status == "maybe", 1),
         else_=2,
     )
 
@@ -28,7 +28,7 @@ def run_browser_validation(run_id: int | None = None) -> Counter[str]:
         counts: Counter[str] = Counter()
         queried_businesses = (
             businesses_for_run_query(session, current_run_id, allow_revisit)
-            .filter(Business.fit_status.in_(["strong", "maybe"]))
+            .filter(Business.prefilter_status.in_(["strong", "maybe"]))
             .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
         )

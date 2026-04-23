@@ -4,24 +4,31 @@
 
 ## V1 Goal
 
-Build a lightweight local pipeline that can surface potential leads, gather site evidence, apply deterministic scoring, and export a compact review package for manual outreach review.
+Build a lightweight local pipeline that can surface potential leads, gather site evidence, run a preserved deterministic path or a scaffolded model-judge path, and export a compact review package for manual outreach review.
 
 ## Current Status
 
-The repo is now a script-driven MVP for repeated weekly lead runs. Discovery, prefiltering, crawl, browser checks, scoring, and review-package export are all wired together for local use.
+The repo is now a script-driven MVP for repeated weekly lead runs. Discovery, prefiltering, crawl, browser checks, final judgment, and review-package export are all wired together for local use.
+
+The architecture is now preservation-first hybrid:
+
+- deterministic prefiltering remains the lightweight admission gate
+- deterministic rubric scoring is preserved and still runnable
+- `model_judge` is the new default scoring mode and intended primary direction
+- the current model-judge path is scaffolded locally and falls back to the preserved deterministic rubric until a live client is added
 
 Canonical website memory is now durable across runs. By default, if a canonical website was surfaced in any prior run, future runs skip it even when the prior lead was weak or only partially evidenced.
 
 ## Workflow
 
 1. Discovery: find candidate businesses and websites.
-2. Prefilter: mark obvious `strong`, `maybe`, and `skip` leads.
+2. Prefilter: mark obvious `strong`, `maybe`, and `skip` admission outcomes.
 3. Crawl: fetch core site pages and save raw HTML.
 4. Screenshots / Checks: capture homepage screenshots and browser signals.
-5. Scoring: apply the rubric and store notes.
+5. Final Judgment: run the selected scoring mode and store notes.
 6. Export / Review: create a compact shortlist package for current-run manual review.
 
-Scoring is deterministic and uses the evidence the repo already collects. If crawl coverage is partial but browser validation still confirms the homepage is reachable, the lead can still be scored with lower confidence instead of automatically collapsing to zero.
+The deterministic rubric still uses the evidence the repo already collects. If crawl coverage is partial but browser validation still confirms the homepage is reachable, the lead can still be scored with lower confidence instead of automatically collapsing to zero.
 
 ## Setup
 
@@ -66,19 +73,26 @@ Run the full pipeline for one query:
 python3 -m app.main --query "painters lowell ma" --niche painters
 ```
 
+The main runner now supports:
+
+- `--scoring-mode model_judge` (default)
+- `--scoring-mode deterministic`
+- `--scoring-mode compare`
+
 Optional discovery controls:
 
 ```bash
 python3 -m app.main \
   --query "painters lowell ma" \
   --niche painters \
+  --scoring-mode model_judge \
   --page-size 10 \
   --max-pages 2
 ```
 
 Default duplicate handling is strict across runs at the canonical website level. A later revisit path is plumbed through `--allow-revisit`, but revisits still require the stored business row to be explicitly marked `eligible_for_revisit` first.
 
-Default exports are also strict: `review_package.json` and `review_package.csv` only include businesses first admitted in the current run. Older leads do not resurface in the default review package unless a dedicated export override is added later.
+Default exports are also strict: each `PipelineRun` writes its own review package under `data/exports/runs/run_<run_id>/`, and those exports only include businesses first admitted in that run. Older leads do not resurface in the default review package unless a dedicated export override is added later.
 
 ## Multi-Query Usage
 
@@ -121,8 +135,9 @@ The pipeline writes local artifacts to:
 - `data/raw/`: raw HTML captured during crawl
 - `data/screenshots/`: desktop and mobile homepage screenshots
 - `data/browser_checks/`: JSON browser-check reports
-- `data/exports/review_package.csv`: flat shortlist export
-- `data/exports/review_package.json`: structured shortlist export
+- `data/exports/runs/run_<run_id>/review_package.csv`: flat shortlist export for one run
+- `data/exports/runs/run_<run_id>/review_package.json`: structured shortlist export for one run
+- `data/exports/runs/run_<run_id>/review_screenshots/`: copied screenshots bundled with that run's review package
 
 The review package includes current-run new candidates only. Within that scope it includes:
 
@@ -136,3 +151,5 @@ The review package includes current-run new candidates only. Within that scope i
 - top issues, quick summary, teardown angle, and skip reason
 
 If a run produces zero `strong` or `maybe` leads, the exporter automatically falls back to the top scored `skip` leads from that same run only, so prior-run leads still do not reappear by default.
+
+For a single query run, check the `run_<run_id>` folder printed at the end of the export step. For a `--query-file` batch, each query gets its own sibling folder under `data/exports/runs/`, so earlier run packages and screenshots are preserved instead of being overwritten by later runs.
