@@ -14,6 +14,7 @@ from app.crawl.page_selector import normalize_url, should_skip_link
 from app.db import SessionLocal
 from app.lead_selection import normalized_website_key
 from app.models import Artifact, Business, Note, Page, Score
+from app.pipeline_runs import businesses_for_run_query, resolve_pipeline_run
 
 
 EXPORT_DIR = Path("data/exports")
@@ -308,7 +309,7 @@ def dedupe_scored_rows(
     grouped_rows: dict[str, list[tuple[Business, Score, Note | None]]] = {}
 
     for business, score, note in rows:
-        website_key = normalized_website_key(business.website) or f"business:{business.id}"
+        website_key = business.canonical_key or normalized_website_key(business.website) or f"business:{business.id}"
         grouped_rows.setdefault(website_key, []).append((business, score, note))
 
     deduped_rows: list[tuple[Business, Score, Note | None]] = []
@@ -339,6 +340,7 @@ def export_review_package(
     limit: int = 20,
     include_maybe: bool = True,
     fallback_to_skips: bool = True,
+    run_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Export strong leads, plus maybe leads when requested, to JSON and CSV."""
     status_order = case(
@@ -348,8 +350,10 @@ def export_review_package(
     )
 
     with SessionLocal() as session:
+        current_run = resolve_pipeline_run(session, run_id)
         query = (
-            session.query(Business, Score, Note)
+            businesses_for_run_query(session, current_run)
+            .with_entities(Business, Score, Note)
             .join(Score, Score.business_id == Business.id)
             .outerjoin(Note, Note.business_id == Business.id)
         )
@@ -373,7 +377,8 @@ def export_review_package(
 
         if not rows and fallback_to_skips:
             fallback_rows = (
-                session.query(Business, Score, Note)
+                businesses_for_run_query(session, current_run)
+                .with_entities(Business, Score, Note)
                 .join(Score, Score.business_id == Business.id)
                 .outerjoin(Note, Note.business_id == Business.id)
                 .filter(Score.fit_status == "skip")
@@ -425,7 +430,7 @@ def export_review_package(
         strong_count = sum(1 for record in records if record["fit_status"] == "strong")
         maybe_count = sum(1 for record in records if record["fit_status"] == "maybe")
 
-        print(f"Exported {len(records)} leads")
+        print(f"Run {current_run.id}: exported {len(records)} leads")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
         print(f"Strong: {strong_count}")
@@ -439,4 +444,7 @@ def export_review_package(
 
 
 if __name__ == "__main__":
+    from app.schema import ensure_database_schema
+
+    ensure_database_schema()
     export_review_package(limit=20, include_maybe=True)

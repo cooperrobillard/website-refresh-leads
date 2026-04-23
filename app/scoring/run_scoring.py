@@ -9,11 +9,13 @@ from sqlalchemy import case
 from app.db import SessionLocal
 from app.lead_selection import dedupe_businesses_by_website, normalized_website_key
 from app.models import Business, Score
+from app.pipeline_runs import businesses_for_run_query, resolve_pipeline_run
+from app.schema import ensure_database_schema
 from app.scoring.rubric import evaluate_business, upsert_score_and_note
 
 
-def run_scoring() -> Counter[str]:
-    """Run the scoring rubric across businesses currently marked strong or maybe."""
+def run_scoring(run_id: int | None = None) -> Counter[str]:
+    """Run the scoring rubric across current-run businesses marked strong or maybe."""
     status_order = case(
         (Business.fit_status == "strong", 0),
         (Business.fit_status == "maybe", 1),
@@ -21,8 +23,9 @@ def run_scoring() -> Counter[str]:
     )
 
     with SessionLocal() as session:
+        current_run = resolve_pipeline_run(session, run_id)
         queried_businesses = (
-            session.query(Business)
+            businesses_for_run_query(session, current_run)
             .filter(Business.fit_status.in_(["strong", "maybe"]))
             .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
@@ -30,11 +33,11 @@ def run_scoring() -> Counter[str]:
         businesses, duplicate_count = dedupe_businesses_by_website(queried_businesses)
         canonical_ids = {business.id for business in businesses}
         canonical_names_by_key = {
-            normalized_website_key(business.website) or f"business:{business.id}": business.name
+            business.canonical_key or normalized_website_key(business.website) or f"business:{business.id}": business.name
             for business in businesses
         }
 
-        print(f"Scoring {len(businesses)} businesses")
+        print(f"Run {current_run.id}: scoring {len(businesses)} businesses")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
         counts: Counter[str] = Counter()
@@ -44,7 +47,7 @@ def run_scoring() -> Counter[str]:
                 continue
 
             business.fit_status = "skip"
-            website_key = normalized_website_key(business.website) or f"business:{business.id}"
+            website_key = business.canonical_key or normalized_website_key(business.website) or f"business:{business.id}"
             business.skip_reason = (
                 f"Duplicate website of canonical business: "
                 f"{canonical_names_by_key.get(website_key, 'another lead')}"
@@ -93,6 +96,7 @@ def run_scoring() -> Counter[str]:
 
 
 def main() -> None:
+    ensure_database_schema()
     run_scoring()
 
 

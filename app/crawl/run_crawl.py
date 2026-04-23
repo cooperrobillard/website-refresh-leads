@@ -7,11 +7,13 @@ from sqlalchemy import case
 from app.db import SessionLocal
 from app.lead_selection import dedupe_businesses_by_website
 from app.models import Business
+from app.pipeline_runs import businesses_for_run_query, resolve_pipeline_run
+from app.schema import ensure_database_schema
 from app.crawl.crawler import crawl_business_site
 
 
-def run_crawl() -> dict[str, int]:
-    """Run the crawl phase for businesses that passed the prefilter."""
+def run_crawl(run_id: int | None = None) -> dict[str, int]:
+    """Run the crawl phase for current-run businesses that passed the prefilter."""
     status_order = case(
         (Business.fit_status == "strong", 0),
         (Business.fit_status == "maybe", 1),
@@ -19,17 +21,18 @@ def run_crawl() -> dict[str, int]:
     )
 
     with SessionLocal() as session:
+        current_run = resolve_pipeline_run(session, run_id)
         success_count = 0
         failure_count = 0
         queried_businesses = (
-            session.query(Business)
+            businesses_for_run_query(session, current_run)
             .filter(Business.fit_status.in_(["strong", "maybe"]))
             .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
         )
         businesses, duplicate_count = dedupe_businesses_by_website(queried_businesses)
 
-        print(f"Found {len(businesses)} businesses to crawl")
+        print(f"Run {current_run.id}: found {len(businesses)} businesses to crawl")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
 
@@ -54,6 +57,7 @@ def run_crawl() -> dict[str, int]:
 
 
 def main() -> None:
+    ensure_database_schema()
     run_crawl()
 
 

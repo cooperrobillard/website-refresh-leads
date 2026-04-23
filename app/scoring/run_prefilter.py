@@ -5,14 +5,16 @@ from __future__ import annotations
 from collections import Counter
 
 from app.db import SessionLocal
-from app.models import Business
+from app.pipeline_runs import businesses_for_run_query, resolve_pipeline_run
 from app.scoring.rules import passes_basic_filters
+from app.schema import ensure_database_schema
 
 
-def run_prefilter() -> Counter[str]:
-    """Run the deterministic prefilter across all saved businesses."""
+def run_prefilter(run_id: int | None = None) -> Counter[str]:
+    """Run the deterministic prefilter across the current run scope."""
     with SessionLocal() as session:
-        businesses = session.query(Business).all()
+        current_run = resolve_pipeline_run(session, run_id)
+        businesses = businesses_for_run_query(session, current_run).all()
         counts: Counter[str] = Counter()
 
         for business in businesses:
@@ -24,7 +26,7 @@ def run_prefilter() -> Counter[str]:
 
         session.commit()
 
-        print(f"Processed {len(businesses)} businesses")
+        print(f"Run {current_run.id}: processed {len(businesses)} businesses")
         print(f"Strong: {counts['strong']}")
         print(f"Maybe: {counts['maybe']}")
         print(f"Skip: {counts['skip']}")
@@ -33,6 +35,7 @@ def run_prefilter() -> Counter[str]:
 
 
 def main() -> None:
+    ensure_database_schema()
     run_prefilter()
 
 

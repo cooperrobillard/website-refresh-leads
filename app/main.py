@@ -8,9 +8,11 @@ from pathlib import Path
 from app.browser.run_browser_checks import run_browser_validation
 from app.crawl.run_crawl import run_crawl
 from app.discovery.run_places import positive_int, run_places_query
+from app.pipeline_runs import finish_pipeline_run, start_pipeline_run
 from app.reports.export_review_package import export_review_package
 from app.scoring.run_prefilter import run_prefilter
 from app.scoring.run_scoring import run_scoring
+from app.schema import ensure_database_schema
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +39,14 @@ def parse_args() -> argparse.Namespace:
         type=positive_int,
         default=1,
         help="Maximum number of Places result pages to fetch per query. Default: 1.",
+    )
+    parser.add_argument(
+        "--allow-revisit",
+        action="store_true",
+        help=(
+            "Allow businesses already marked eligible_for_revisit to re-enter the run. "
+            "Default: false."
+        ),
     )
     return parser.parse_args()
 
@@ -92,33 +102,50 @@ def run_pipeline_for_query(
     niche: str,
     page_size: int,
     max_pages: int,
+    allow_revisit: bool = False,
 ) -> None:
     """Run the full sequential pipeline for one query/niche pair."""
     print(f"Query: {query}")
     print(f"Niche: {niche}")
+    current_run = start_pipeline_run(
+        query=query,
+        niche=niche,
+        allow_revisit=allow_revisit,
+    )
+    print(f"Run ID: {current_run.id} | allow_revisit={current_run.allow_revisit}")
 
-    print("\n[1/6] Discovery")
-    run_places_query(query=query, niche=niche, page_size=page_size, max_pages=max_pages)
+    try:
+        print("\n[1/6] Discovery")
+        run_places_query(
+            query=query,
+            niche=niche,
+            page_size=page_size,
+            max_pages=max_pages,
+            run_id=current_run.id,
+        )
 
-    print("\n[2/6] Prefilter")
-    run_prefilter()
+        print("\n[2/6] Prefilter")
+        run_prefilter(run_id=current_run.id)
 
-    print("\n[3/6] Crawl")
-    run_crawl()
+        print("\n[3/6] Crawl")
+        run_crawl(run_id=current_run.id)
 
-    print("\n[4/6] Browser Checks")
-    run_browser_validation()
+        print("\n[4/6] Browser Checks")
+        run_browser_validation(run_id=current_run.id)
 
-    print("\n[5/6] Scoring")
-    run_scoring()
+        print("\n[5/6] Scoring")
+        run_scoring(run_id=current_run.id)
 
-    print("\n[6/6] Export Review Package")
-    export_review_package(limit=20, include_maybe=True)
+        print("\n[6/6] Export Review Package")
+        export_review_package(limit=20, include_maybe=True, run_id=current_run.id)
+    finally:
+        finish_pipeline_run(current_run.id)
 
 
 def main() -> None:
     """Run the local lead-generation pipeline from the command line."""
     args = parse_args()
+    ensure_database_schema()
     try:
         jobs = load_query_jobs(args.query, args.niche, args.query_file)
     except ValueError as exc:
@@ -135,6 +162,7 @@ def main() -> None:
             niche=niche,
             page_size=args.page_size,
             max_pages=args.max_pages,
+            allow_revisit=args.allow_revisit,
         )
 
     print("\nPipeline run complete.")

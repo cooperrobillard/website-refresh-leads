@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import requests
 from sqlalchemy.orm import Session
 
+from app.canonical_sites import canonical_website_key, canonical_website_url
 from app.config import GOOGLE_PLACES_API_KEY
-from app.lead_selection import normalized_website_key, normalize_website_url
-from app.models import Business
+from app.lead_selection import normalize_website_url
+from app.models import Business, PipelineRun
 
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 
@@ -72,20 +74,77 @@ def normalize_place(place: dict[str, Any], niche: str, query_used: str) -> dict[
     }
 
 
-def upsert_businesses(session: Session, places: list[dict[str, Any]], niche: str, query_used: str) -> tuple[int, int]:
-    """Insert new businesses and update existing rows by place_id."""
-    if not places:
-        return 0, 0
+def _apply_discovery_metadata(
+    business: Business,
+    *,
+    row: dict[str, Any],
+    canonical_url: str | None,
+    current_run: PipelineRun,
+) -> bool:
+    """Apply lightweight metadata updates when a business is seen again."""
+    changed = False
 
-    inserted = 0
-    updated = 0
+    if row["place_id"] and not business.place_id:
+        business.place_id = row["place_id"]
+        changed = True
+
+    if canonical_url != business.canonical_url:
+        business.canonical_url = canonical_url
+        changed = True
+
+    field_updates = {
+        "name": row["name"],
+        "niche": row["niche"],
+        "query_used": row["query_used"],
+        "website": row["website"],
+        "address": row["address"],
+        "primary_type": row["primary_type"],
+        "rating": row["rating"],
+        "review_count": row["review_count"],
+    }
+
+    for field_name, value in field_updates.items():
+        if getattr(business, field_name) != value:
+            setattr(business, field_name, value)
+            changed = True
+
+    seen_at = datetime.utcnow()
+    business.last_seen_at = seen_at
+    business.last_seen_run_id = current_run.id
+    if business.first_seen_at is None:
+        business.first_seen_at = seen_at
+
+    return changed
+
+
+def upsert_businesses(
+    session: Session,
+    places: list[dict[str, Any]],
+    niche: str,
+    query_used: str,
+    current_run: PipelineRun,
+) -> dict[str, int]:
+    """Insert brand-new canonical sites and skip already-processed sites by default."""
+    if not places:
+        return {
+            "inserted": 0,
+            "updated_metadata": 0,
+            "skipped_existing_processed": 0,
+        }
+
+    counts = {
+        "inserted": 0,
+        "updated_metadata": 0,
+        "skipped_existing_processed": 0,
+    }
 
     rows = [normalize_place(place, niche=niche, query_used=query_used) for place in places]
     place_ids = [row["place_id"] for row in rows if row["place_id"]]
     website_keys = {
-        normalized_website_key(row["website"])
+        canonical_key
         for row in rows
-        if row["website"]
+        for canonical_key in [canonical_website_key(row["website"])]
+        if canonical_key
     }
 
     existing_by_place_id = {
@@ -95,47 +154,66 @@ def upsert_businesses(session: Session, places: list[dict[str, Any]], niche: str
     }
     existing_by_website_key: dict[str, Business] = {}
     if website_keys:
-        for business in session.query(Business).filter(Business.website.isnot(None)).all():
-            website_key = normalized_website_key(business.website)
-            if website_key and website_key in website_keys and website_key not in existing_by_website_key:
-                existing_by_website_key[website_key] = business
+        for business in session.query(Business).filter(Business.canonical_key.in_(website_keys)).all():
+            if business.canonical_key and business.canonical_key not in existing_by_website_key:
+                existing_by_website_key[business.canonical_key] = business
 
     for row in rows:
-        website_key = normalized_website_key(row["website"])
-        existing = existing_by_place_id.get(row["place_id"])
-        if not existing and website_key:
-            existing = existing_by_website_key.get(website_key)
+        canonical_key = canonical_website_key(row["website"])
+        canonical_url = canonical_website_url(row["website"])
+        existing_by_place = existing_by_place_id.get(row["place_id"])
+        existing_by_canonical = existing_by_website_key.get(canonical_key) if canonical_key else None
+        existing = existing_by_canonical or existing_by_place
 
         if existing:
-            if row["place_id"] and not existing.place_id:
-                existing.place_id = row["place_id"]
-            existing.name = row["name"]
-            existing.niche = row["niche"]
-            existing.query_used = row["query_used"]
-            existing.website = row["website"]
-            existing.address = row["address"]
-            existing.primary_type = row["primary_type"]
-            existing.rating = row["rating"]
-            existing.review_count = row["review_count"]
-            updated += 1
-        else:
-            business = Business(
-                place_id=row["place_id"],
-                name=row["name"],
-                niche=row["niche"],
-                query_used=row["query_used"],
-                website=row["website"],
-                address=row["address"],
-                primary_type=row["primary_type"],
-                rating=row["rating"],
-                review_count=row["review_count"],
+            if canonical_key and not existing.canonical_key and canonical_key not in existing_by_website_key:
+                existing.canonical_key = canonical_key
+                existing_by_website_key[canonical_key] = existing
+
+            metadata_changed = _apply_discovery_metadata(
+                existing,
+                row=row,
+                canonical_url=canonical_url,
+                current_run=current_run,
             )
-            session.add(business)
-            if row["place_id"]:
-                existing_by_place_id[row["place_id"]] = business
-            if website_key:
-                existing_by_website_key[website_key] = business
-            inserted += 1
+
+            if existing.discovery_run_id == current_run.id:
+                if metadata_changed:
+                    counts["updated_metadata"] += 1
+                continue
+
+            if current_run.allow_revisit and existing.eligible_for_revisit:
+                if metadata_changed:
+                    counts["updated_metadata"] += 1
+                continue
+
+            counts["skipped_existing_processed"] += 1
+            continue
+
+        seen_at = datetime.utcnow()
+        business = Business(
+            place_id=row["place_id"],
+            name=row["name"],
+            niche=row["niche"],
+            query_used=row["query_used"],
+            website=row["website"],
+            canonical_key=canonical_key,
+            canonical_url=canonical_url,
+            address=row["address"],
+            primary_type=row["primary_type"],
+            rating=row["rating"],
+            review_count=row["review_count"],
+            discovery_run_id=current_run.id,
+            first_seen_at=seen_at,
+            last_seen_at=seen_at,
+            last_seen_run_id=current_run.id,
+        )
+        session.add(business)
+        if row["place_id"]:
+            existing_by_place_id[row["place_id"]] = business
+        if canonical_key:
+            existing_by_website_key[canonical_key] = business
+        counts["inserted"] += 1
 
     session.commit()
-    return inserted, updated
+    return counts

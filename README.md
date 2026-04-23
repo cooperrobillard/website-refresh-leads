@@ -10,6 +10,8 @@ Build a lightweight local pipeline that can surface potential leads, gather site
 
 The repo is now a script-driven MVP for repeated weekly lead runs. Discovery, prefiltering, crawl, browser checks, scoring, and review-package export are all wired together for local use.
 
+Canonical website memory is now durable across runs. By default, if a canonical website was surfaced in any prior run, future runs skip it even when the prior lead was weak or only partially evidenced.
+
 ## Workflow
 
 1. Discovery: find candidate businesses and websites.
@@ -41,7 +43,13 @@ cp .env.example .env
 Create the local SQLite database and tables:
 
 ```bash
-python -m app.init_db
+python3 -m app.init_db
+```
+
+If you already have an older local database from before the canonical-memory schema change, the code will try to backfill it automatically. For the cleanest path after this upgrade, a one-time reset is acceptable:
+
+```bash
+python3 -m app.init_db --reset
 ```
 
 The project reads configuration from `.env` via `python-dotenv`. The main database setting is:
@@ -55,25 +63,27 @@ DATABASE_URL=sqlite:///data/leads.db
 Run the full pipeline for one query:
 
 ```bash
-python -m app.main --query "painters lowell ma" --niche painters
+python3 -m app.main --query "painters lowell ma" --niche painters
 ```
 
 Optional discovery controls:
 
 ```bash
-python -m app.main \
+python3 -m app.main \
   --query "painters lowell ma" \
   --niche painters \
   --page-size 10 \
   --max-pages 2
 ```
 
+Default duplicate handling is strict across runs at the canonical website level. A later revisit path is plumbed through `--allow-revisit`, but revisits still require the stored business row to be explicitly marked `eligible_for_revisit` first.
+
 ## Multi-Query Usage
 
 Run multiple queries from a plain text file:
 
 ```bash
-python -m app.main --query-file prompts/queries.txt --niche painters
+python3 -m app.main --query-file prompts/queries.txt --niche painters
 ```
 
 The query file supports:
@@ -94,7 +104,7 @@ pressure washing nashua nh | pressure_washing
 If you want to run discovery by itself:
 
 ```bash
-python -m app.discovery.run_places \
+python3 -m app.discovery.run_places \
   --query "painters lowell ma" \
   --niche painters \
   --page-size 10 \
