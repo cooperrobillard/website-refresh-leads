@@ -73,7 +73,7 @@ python -m app.main \
 Run multiple queries from a plain text file:
 
 ```bash
-python -m app.main --query-file prompts/weekly_queries.txt --niche painters
+python -m app.main --query-file prompts/queries.txt --niche painters
 ```
 
 The query file supports:

@@ -1,7 +1,5 @@
 requests
 python-dotenv
-pydantic
 sqlalchemy
-pandas
 playwright
 beautifulsoup4
