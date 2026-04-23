@@ -19,6 +19,8 @@ The repo is now a script-driven MVP for repeated weekly lead runs. Discovery, pr
 5. Scoring: apply the rubric and store notes.
 6. Export / Review: create a compact shortlist package for manual review.
 
+Scoring is deterministic and uses the evidence the repo already collects. If crawl coverage is partial but browser validation still confirms the homepage is reachable, the lead can still be scored with lower confidence instead of automatically collapsing to zero.
+
 ## Setup
 
 1. Create and activate a virtual environment.
@@ -118,3 +120,5 @@ The review package includes:
 - selected page URLs
 - screenshot paths
 - top issues, quick summary, teardown angle, and skip reason
+
+If a run produces zero `strong` or `maybe` leads, the exporter automatically falls back to the top scored `skip` leads so the review package is never empty after a nontrivial run.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import case
 
 from app.db import SessionLocal
+from app.lead_selection import dedupe_businesses_by_website
 from app.models import Business
 from app.crawl.crawler import crawl_business_site
 
@@ -20,14 +21,17 @@ def run_crawl() -> dict[str, int]:
     with SessionLocal() as session:
         success_count = 0
         failure_count = 0
-        businesses = (
+        queried_businesses = (
             session.query(Business)
             .filter(Business.fit_status.in_(["strong", "maybe"]))
             .order_by(status_order, Business.review_count.desc(), Business.name.asc())
             .all()
         )
+        businesses, duplicate_count = dedupe_businesses_by_website(queried_businesses)
 
         print(f"Found {len(businesses)} businesses to crawl")
+        if duplicate_count:
+            print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
 
         for business in businesses:
             print(f"\nCrawling: {business.name} | {business.website}")

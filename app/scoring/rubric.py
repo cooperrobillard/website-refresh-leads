@@ -8,6 +8,8 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.crawl.page_selector import should_skip_link
+from app.lead_selection import normalize_website_url
 from app.models import Business, Note, Page, Score
 from app.scoring.rules import primary_type_blocked, website_looks_blocked
 
@@ -21,8 +23,8 @@ WEIGHTS = {
     "outreach_viability": 10,
 }
 
-STRONG_THRESHOLD = 80
-MAYBE_THRESHOLD = 65
+STRONG_THRESHOLD = 75
+MAYBE_THRESHOLD = 55
 MIN_STRONG_LEGITIMACY = 12
 MIN_MAYBE_LEGITIMACY = 8
 MIN_STRONG_OPPORTUNITY = 18
@@ -67,6 +69,17 @@ GENERIC_COPY_HINTS = [
     "we are here to help",
     "learn more",
     "contact us today",
+]
+
+LEGACY_URL_HINTS = [
+    ".aspx",
+    ".asp",
+    ".php.html",
+]
+
+CAMPAIGN_URL_HINTS = [
+    "landing-page",
+    "gbp-landing",
 ]
 
 
@@ -118,10 +131,59 @@ def get_pages(session: Session, business: Business) -> dict[str, Page]:
     page_map: dict[str, Page] = {}
 
     for row in rows:
+        if row.page_type != "home" and row.url and should_skip_link(row.url):
+            continue
         if row.page_type and row.page_type not in page_map:
             page_map[row.page_type] = row
 
     return page_map
+
+
+def report_homepage_url(report: dict[str, object]) -> str | None:
+    """Return the normalized homepage URL stored in the browser report."""
+    homepage_url = report.get("homepage_url")
+    if isinstance(homepage_url, str):
+        return normalize_website_url(homepage_url)
+    return None
+
+
+def get_homepage_url(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> str | None:
+    """Return the best homepage URL available from crawl, browser checks, or discovery."""
+    home_page = page_map.get("home")
+    if home_page and home_page.url:
+        return normalize_website_url(home_page.url)
+
+    return report_homepage_url(report) or normalize_website_url(business.website)
+
+
+def homepage_loaded(report: dict[str, object]) -> bool:
+    """Return True when the browser report indicates the homepage was reachable."""
+    signals = report.get("homepage_signals", {})
+    page_loads = report.get("page_loads", {})
+
+    return bool(
+        report.get("success") is True
+        and (
+            signals.get("homepage_loaded", False)
+            or page_loads.get("home", False)
+        )
+    )
+
+
+def has_homepage_evidence(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> bool:
+    """Return True when the business has crawl or browser evidence for its homepage."""
+    if "home" in page_map:
+        return True
+
+    return bool(get_homepage_url(business, page_map, report) and homepage_loaded(report))
 
 
 def combined_text(page_map: dict[str, Page]) -> str:
@@ -151,6 +213,29 @@ def count_relevant_pages(page_map: dict[str, Page]) -> int:
     return sum(1 for key in ["home", "about", "services", "contact", "gallery", "faq"] if key in page_map)
 
 
+def known_urls(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> list[str]:
+    """Return the best-known URLs for this business across crawl and browser evidence."""
+    urls = [page.url for page in page_map.values() if page.url]
+    homepage_url = get_homepage_url(business, page_map, report)
+    if homepage_url:
+        urls.append(homepage_url)
+
+    seen_urls: set[str] = set()
+    deduped_urls: list[str] = []
+    for url in urls:
+        normalized = normalize_website_url(url)
+        if not normalized or normalized in seen_urls:
+            continue
+        seen_urls.add(normalized)
+        deduped_urls.append(normalized)
+
+    return deduped_urls
+
+
 def opportunity_score(scores: dict[str, int]) -> int:
     """Return the combined redesign-opportunity subtotal."""
     return (
@@ -160,9 +245,43 @@ def opportunity_score(scores: dict[str, int]) -> int:
     )
 
 
+def is_google_sites_site(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> bool:
+    """Return True when the site appears to be hosted on Google Sites."""
+    homepage_url = get_homepage_url(business, page_map, report)
+    return bool(homepage_url and "sites.google.com" in homepage_url)
+
+
+def has_legacy_url_pattern(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> bool:
+    """Return True when the site uses obviously legacy URL patterns."""
+    urls = " ".join(known_urls(business, page_map, report)).lower()
+    return any(hint in urls for hint in LEGACY_URL_HINTS)
+
+
+def is_campaign_landing_page(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> bool:
+    """Return True when the homepage looks like a campaign or franchise landing page."""
+    homepage_url = get_homepage_url(business, page_map, report)
+    if not homepage_url:
+        return False
+    lowered = homepage_url.lower()
+    return any(hint in lowered for hint in CAMPAIGN_URL_HINTS)
+
+
 def detect_hard_skip(
     business: Business,
     page_map: dict[str, Page],
+    report: dict[str, object],
 ) -> str | None:
     """Return a hard-skip reason when the business is clearly out of scope."""
     if not business.website:
@@ -178,17 +297,21 @@ def detect_hard_skip(
     if review_count <= MIN_REVIEWS_HARD_SKIP:
         return f"Weak legitimacy / too few reviews: {review_count}"
 
-    urls = " ".join(page.url.lower() for page in page_map.values() if page.url)
+    urls = " ".join(url.lower() for url in known_urls(business, page_map, report))
     if has_any(urls, HIGH_UPDATE_HINTS):
         return "Frequent-content-update or ecommerce-heavy site"
 
-    if "home" not in page_map:
+    if not has_homepage_evidence(business, page_map, report):
         return "No crawlable homepage found"
 
     return None
 
 
-def score_business_legitimacy(business: Business, page_map: dict[str, Page]) -> int:
+def score_business_legitimacy(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> int:
     """Score how clearly this looks like a real local service business."""
     score = 0
 
@@ -215,15 +338,22 @@ def score_business_legitimacy(business: Business, page_map: dict[str, Page]) -> 
 
     if count_relevant_pages(page_map) >= 3:
         score += 2
+    elif homepage_loaded(report):
+        score += 1
 
     return clamp(score, 0, WEIGHTS["business_legitimacy"])
 
 
-def score_website_weakness(page_map: dict[str, Page], report: dict) -> int:
+def score_website_weakness(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> int:
     """Score how much obvious website-refresh opportunity is present."""
     score = 0
     home_text = homepage_text(page_map)
     full_text = combined_text(page_map)
+    relevant_pages = count_relevant_pages(page_map)
 
     if "services" not in page_map:
         score += 5
@@ -244,6 +374,17 @@ def score_website_weakness(page_map: dict[str, Page], report: dict) -> int:
 
     if has_any(home_text, GENERIC_COPY_HINTS):
         score += 2
+
+    if relevant_pages <= 2:
+        score += 4
+    elif relevant_pages == 3:
+        score += 2
+
+    if is_google_sites_site(business, page_map, report):
+        score += 6
+
+    if has_legacy_url_pattern(business, page_map, report):
+        score += 3
 
     signals = report.get("homepage_signals", {})
     if signals and not signals.get("homepage_loaded", False):
@@ -269,7 +410,11 @@ def score_conversion_opportunity(page_map: dict[str, Page], report: dict) -> int
     return clamp(score, 0, WEIGHTS["conversion_opportunity"])
 
 
-def score_trust_packaging(business: Business, page_map: dict[str, Page]) -> int:
+def score_trust_packaging(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> int:
     """Score missing trust and proof elements that help win local work."""
     score = 0
     text = combined_text(page_map)
@@ -289,13 +434,23 @@ def score_trust_packaging(business: Business, page_map: dict[str, Page]) -> int:
     if "about" not in page_map:
         score += 3
 
+    if count_relevant_pages(page_map) <= 2:
+        score += 2
+
+    if is_google_sites_site(business, page_map, report):
+        score += 1
+
     return clamp(score, 0, WEIGHTS["trust_packaging"])
 
 
-def score_complexity_fit(page_map: dict[str, Page]) -> int:
+def score_complexity_fit(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> int:
     """Score how manageable the site looks for a practical refresh project."""
     score = 0
-    urls = " ".join(page.url.lower() for page in page_map.values() if page.url)
+    urls = " ".join(url.lower() for url in known_urls(business, page_map, report))
     relevant_count = count_relevant_pages(page_map)
 
     if relevant_count >= 3:
@@ -308,6 +463,9 @@ def score_complexity_fit(page_map: dict[str, Page]) -> int:
 
     if not has_any(urls, HIGH_UPDATE_HINTS):
         score += 5
+
+    if is_campaign_landing_page(business, page_map, report):
+        score -= 8
 
     return clamp(score, 0, WEIGHTS["complexity_fit"])
 
@@ -336,7 +494,11 @@ def score_outreach_viability(business: Business, page_map: dict[str, Page], repo
     return clamp(score, 0, WEIGHTS["outreach_viability"])
 
 
-def build_top_issues(page_map: dict[str, Page], report: dict[str, object]) -> list[str]:
+def build_top_issues(
+    business: Business,
+    page_map: dict[str, Page],
+    report: dict[str, object],
+) -> list[str]:
     """Build a short list of concrete site issues to mention in notes."""
     issues = []
     signals = report.get("homepage_signals", {})
@@ -356,6 +518,12 @@ def build_top_issues(page_map: dict[str, Page], report: dict[str, object]) -> li
 
     if "gallery" not in page_map and not has_any(text, GALLERY_KEYWORDS):
         issues.append("Project proof is underused or hard to find.")
+
+    if count_relevant_pages(page_map) <= 2:
+        issues.append("Site structure is thin and key pages are limited.")
+
+    if is_google_sites_site(business, page_map, report) or has_legacy_url_pattern(business, page_map, report):
+        issues.append("Site appears to run on a legacy or lower-polish platform.")
 
     if not issues:
         issues.append("Website looks usable, but the redesign opportunity is less obvious.")
@@ -409,7 +577,7 @@ def evaluate_business(session: Session, business: Business) -> ScoringResult:
     page_map = get_pages(session, business)
     report = load_browser_report(business)
 
-    hard_skip_reason = detect_hard_skip(business, page_map)
+    hard_skip_reason = detect_hard_skip(business, page_map, report)
     if hard_skip_reason:
         return ScoringResult(
             fit_status="skip",
@@ -423,27 +591,31 @@ def evaluate_business(session: Session, business: Business) -> ScoringResult:
         )
 
     scores = {
-        "business_legitimacy": score_business_legitimacy(business, page_map),
-        "website_weakness": score_website_weakness(page_map, report),
+        "business_legitimacy": score_business_legitimacy(business, page_map, report),
+        "website_weakness": score_website_weakness(business, page_map, report),
         "conversion_opportunity": score_conversion_opportunity(page_map, report),
-        "trust_packaging": score_trust_packaging(business, page_map),
-        "complexity_fit": score_complexity_fit(page_map),
+        "trust_packaging": score_trust_packaging(business, page_map, report),
+        "complexity_fit": score_complexity_fit(business, page_map, report),
         "outreach_viability": score_outreach_viability(business, page_map, report),
     }
 
     total_score = sum(scores.values())
     fit_status = classify_total_score(total_score, scores)
-    top_issues = build_top_issues(page_map, report)
+    top_issues = build_top_issues(business, page_map, report)
 
     confidence = "medium"
-    if count_relevant_pages(page_map) >= 4 and report.get("success") is True:
+    if not page_map and homepage_loaded(report):
+        confidence = "low"
+    elif "home" not in page_map and has_homepage_evidence(business, page_map, report):
+        confidence = "low"
+    elif count_relevant_pages(page_map) >= 4 and report.get("success") is True:
         confidence = "high"
     elif count_relevant_pages(page_map) <= 2 or report.get("success") is False:
         confidence = "low"
 
     return ScoringResult(
         fit_status=fit_status,
-        skip_reason=None if fit_status != "skip" else "Limited redesign or outreach upside based on the current rubric",
+        skip_reason=None if fit_status != "skip" else f"Score below review threshold: {total_score}",
         scores=scores,
         total_score=total_score,
         confidence=confidence,

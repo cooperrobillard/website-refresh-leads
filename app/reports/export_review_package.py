@@ -11,6 +11,7 @@ from sqlalchemy import case
 
 from app.crawl.page_selector import normalize_url, should_skip_link
 from app.db import SessionLocal
+from app.lead_selection import normalized_website_key
 from app.models import Artifact, Business, Note, Page, Score
 
 
@@ -191,7 +192,45 @@ def write_csv(records: list[dict[str, Any]], output_path: Path) -> None:
             )
 
 
-def export_review_package(limit: int = 20, include_maybe: bool = True) -> list[dict[str, Any]]:
+def dedupe_scored_rows(
+    rows: list[tuple[Business, Score, Note | None]],
+) -> tuple[list[tuple[Business, Score, Note | None]], int]:
+    """Keep one canonical scored row per normalized website key."""
+    grouped_rows: dict[str, list[tuple[Business, Score, Note | None]]] = {}
+
+    for business, score, note in rows:
+        website_key = normalized_website_key(business.website) or f"business:{business.id}"
+        grouped_rows.setdefault(website_key, []).append((business, score, note))
+
+    deduped_rows: list[tuple[Business, Score, Note | None]] = []
+    for row_group in grouped_rows.values():
+        canonical_row = max(
+            row_group,
+            key=lambda row: (
+                row[0].review_count or 0,
+                row[1].total_score or 0,
+                -row[0].id,
+            ),
+        )
+        deduped_rows.append(canonical_row)
+
+    deduped_rows.sort(
+        key=lambda row: (
+            0 if row[1].fit_status == "strong" else 1 if row[1].fit_status == "maybe" else 2,
+            -(row[1].total_score or 0),
+            -(row[0].review_count or 0),
+            row[0].name.lower(),
+        )
+    )
+
+    return deduped_rows, len(rows) - len(deduped_rows)
+
+
+def export_review_package(
+    limit: int = 20,
+    include_maybe: bool = True,
+    fallback_to_skips: bool = True,
+) -> list[dict[str, Any]]:
     """Export strong leads, plus maybe leads when requested, to JSON and CSV."""
     status_order = case(
         (Score.fit_status == "strong", 0),
@@ -218,9 +257,25 @@ def export_review_package(limit: int = 20, include_maybe: bool = True) -> list[d
                 Business.review_count.desc(),
                 Business.name.asc(),
             )
-            .limit(limit)
             .all()
         )
+        rows, duplicate_count = dedupe_scored_rows(rows)
+        rows = rows[:limit]
+
+        if not rows and fallback_to_skips:
+            fallback_rows = (
+                session.query(Business, Score, Note)
+                .join(Score, Score.business_id == Business.id)
+                .outerjoin(Note, Note.business_id == Business.id)
+                .filter(Score.fit_status == "skip")
+                .order_by(Score.total_score.desc(), Business.review_count.desc(), Business.name.asc())
+                .all()
+            )
+            fallback_rows, fallback_duplicate_count = dedupe_scored_rows(fallback_rows)
+            rows = fallback_rows[:limit]
+            duplicate_count += fallback_duplicate_count
+            if rows:
+                print("No strong/maybe leads found. Exporting top scored skip leads as fallback.")
 
         business_ids = [business.id for business, _, _ in rows]
 
@@ -261,6 +316,8 @@ def export_review_package(limit: int = 20, include_maybe: bool = True) -> list[d
         maybe_count = sum(1 for record in records if record["fit_status"] == "maybe")
 
         print(f"Exported {len(records)} leads")
+        if duplicate_count:
+            print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
         print(f"Strong: {strong_count}")
         print(f"Maybe: {maybe_count}")
         print(f"JSON: {json_path}")
