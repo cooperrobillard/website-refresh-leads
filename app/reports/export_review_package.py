@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +18,16 @@ from app.models import Artifact, Business, Note, Page, Score
 
 EXPORT_DIR = Path("data/exports")
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+EXPORT_SCREENSHOT_DIR = EXPORT_DIR / "review_screenshots"
 
 PAGE_TYPES = ["home", "about", "services", "contact", "gallery", "faq"]
 ARTIFACT_TYPES = {
     "homepage_desktop": "desktop_home_screenshot",
     "homepage_mobile": "mobile_home_screenshot",
+}
+SCREENSHOT_EXPORT_TYPES = {
+    "homepage_desktop": "desktop",
+    "homepage_mobile": "mobile",
 }
 CSV_COLUMNS = [
     "business_id",
@@ -73,6 +79,13 @@ def sanitize_page_url(page_type: str, url: str | None) -> str | None:
         return None
 
     return normalized
+
+
+def slugify(value: str) -> str:
+    """Create a filesystem-friendly slug for export filenames."""
+    slug = "".join(char.lower() if char.isalnum() else "-" for char in value)
+    parts = [part for part in slug.split("-") if part]
+    return "-".join(parts) or "business"
 
 
 def build_page_maps(rows: list[Page]) -> dict[int, dict[str, str | None]]:
@@ -148,6 +161,102 @@ def build_review_record(
         "teardown_angle": note.teardown_angle if note else None,
         "skip_reason": business.skip_reason,
     }
+
+
+def recreate_export_directory(directory: Path) -> None:
+    """Reset the export screenshot directory so each run starts clean."""
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+
+def build_export_screenshot_name(
+    *,
+    business_name: str,
+    business_id: int,
+    variant: str,
+    source_path: str,
+    used_filenames: set[str],
+) -> str:
+    """Build a collision-safe screenshot filename for the export folder."""
+    suffix = Path(source_path).suffix or ".png"
+    business_slug = slugify(business_name)
+
+    filename = f"{business_slug}_{variant}{suffix}"
+    if filename not in used_filenames:
+        used_filenames.add(filename)
+        return filename
+
+    filename = f"{business_slug}_{business_id}_{variant}{suffix}"
+    counter = 2
+    while filename in used_filenames:
+        filename = f"{business_slug}_{business_id}_{variant}_{counter}{suffix}"
+        counter += 1
+
+    used_filenames.add(filename)
+    return filename
+
+
+def copy_screenshot_for_export(
+    *,
+    business_name: str,
+    business_id: int,
+    variant: str,
+    source_path: str | None,
+    export_dir: Path,
+    used_filenames: set[str],
+) -> str | None:
+    """Copy one screenshot into the export folder when the source file exists."""
+    if not source_path:
+        return None
+
+    source = Path(source_path)
+    if not source.exists():
+        return None
+
+    filename = build_export_screenshot_name(
+        business_name=business_name,
+        business_id=business_id,
+        variant=variant,
+        source_path=source_path,
+        used_filenames=used_filenames,
+    )
+    destination = export_dir / filename
+
+    try:
+        shutil.copy2(source, destination)
+    except OSError:
+        return None
+
+    return destination.as_posix()
+
+
+def collect_export_screenshots(records: list[dict[str, Any]]) -> int:
+    """Copy screenshots for exported leads into a clean export bundle."""
+    recreate_export_directory(EXPORT_SCREENSHOT_DIR)
+
+    copied_count = 0
+    used_filenames: set[str] = set()
+
+    for record in records:
+        export_screenshots: dict[str, str | None] = {}
+
+        for screenshot_key, variant in SCREENSHOT_EXPORT_TYPES.items():
+            export_path = copy_screenshot_for_export(
+                business_name=record["business_name"],
+                business_id=record["business_id"],
+                variant=variant,
+                source_path=record["screenshots"].get(screenshot_key),
+                export_dir=EXPORT_SCREENSHOT_DIR,
+                used_filenames=used_filenames,
+            )
+            export_screenshots[screenshot_key] = export_path
+            if export_path:
+                copied_count += 1
+
+        record["export_screenshots"] = export_screenshots
+
+    return copied_count
 
 
 def write_csv(records: list[dict[str, Any]], output_path: Path) -> None:
@@ -305,6 +414,7 @@ def export_review_package(
             )
             for business, score, note in rows
         ]
+        copied_screenshot_count = collect_export_screenshots(records)
 
         json_path = EXPORT_DIR / "review_package.json"
         json_path.write_text(json.dumps(records, indent=2), encoding="utf-8")
@@ -322,6 +432,8 @@ def export_review_package(
         print(f"Maybe: {maybe_count}")
         print(f"JSON: {json_path}")
         print(f"CSV:  {csv_path}")
+        print(f"Copied screenshots: {copied_screenshot_count}")
+        print(f"Screenshot export folder: {EXPORT_SCREENSHOT_DIR}")
 
         return records
 
