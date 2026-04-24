@@ -121,6 +121,15 @@ The query file supports:
 - One query per line, using the CLI `--niche` as the shared niche
 - Or `query | niche` per line when different niches are needed
 
+When you use `--query-file`, the pipeline now also builds one batch-level review package under `data/exports/batches/batch_<timestamp>_<query_file_stem>/`. That batch export:
+
+- combines only the non-empty per-run exports from that invocation by default
+- writes `combined_review_package.json`, `combined_review_package.csv`, `batch_summary.csv`, and `review_screenshots/`
+- preserves which run each exported lead came from
+- deletes only that batch invocation's per-run export folders under `data/exports/runs/` after the batch export is written successfully
+
+If batch export creation fails, the per-run export folders are left in place.
+
 Example:
 
 ```text
@@ -152,6 +161,11 @@ The pipeline writes local artifacts to:
 - `data/exports/runs/run_<run_id>/review_package.csv`: flat shortlist export for one run
 - `data/exports/runs/run_<run_id>/review_package.json`: structured shortlist export for one run
 - `data/exports/runs/run_<run_id>/review_screenshots/`: copied screenshots bundled with that run's review package
+- `data/exports/batches/batch_<timestamp>_<query_file_stem>/combined_review_package.json`: combined structured shortlist for one `--query-file` batch
+- `data/exports/batches/batch_<timestamp>_<query_file_stem>/combined_review_package.csv`: combined flat shortlist for one `--query-file` batch
+- `data/exports/batches/batch_<timestamp>_<query_file_stem>/batch_summary.csv`: run-level inclusion and count summary for the batch
+- `data/exports/batches/batch_<timestamp>_<query_file_stem>/review_screenshots/`: screenshots copied for the included runs in that batch
+- `data/exports/batches/batch_<timestamp>_<query_file_stem>/batch_metadata.json`: lightweight batch metadata and cleanup results
 
 The review package includes current-run new candidates only. Within that scope it includes:
 
@@ -168,4 +182,4 @@ The review package includes current-run new candidates only. Within that scope i
 
 If a run produces zero `strong` or `maybe` leads, the exporter automatically falls back to the top scored `skip` leads from that same run only, so prior-run leads still do not reappear by default.
 
-For a single query run, check the `run_<run_id>` folder printed at the end of the export step. For a `--query-file` batch, each query gets its own sibling folder under `data/exports/runs/`, so earlier run packages and screenshots are preserved instead of being overwritten by later runs.
+For a single query run, check the `run_<run_id>` folder printed at the end of the export step. For a `--query-file` batch, the pipeline still creates those per-run folders first for traceability, then rolls the current batch into one batch export folder and removes only the current batch's now-redundant per-run export folders after the combined batch export succeeds.

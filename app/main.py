@@ -10,7 +10,9 @@ from app.crawl.run_crawl import run_crawl
 from app.discovery.run_places import positive_int, run_places_query
 from app.judging.runner import run_final_judgment
 from app.pipeline_runs import finish_pipeline_run, start_pipeline_run
+from app.reports.export_batch_review_package import RunBatchExport, export_batch_review_package
 from app.reports.export_review_package import export_review_package
+from app.reports.export_review_package import run_export_directory
 from app.scoring.run_prefilter import run_prefilter
 from app.schema import ensure_database_schema
 
@@ -113,7 +115,7 @@ def run_pipeline_for_query(
     max_pages: int,
     allow_revisit: bool = False,
     scoring_mode: str = "model_judge",
-) -> None:
+) -> RunBatchExport:
     """Run the full sequential pipeline for one query/niche pair."""
     print(f"Query: {query}")
     print(f"Niche: {niche}")
@@ -129,7 +131,7 @@ def run_pipeline_for_query(
 
     try:
         print("\n[1/6] Discovery")
-        run_places_query(
+        discovery_counts = run_places_query(
             query=query,
             niche=niche,
             page_size=page_size,
@@ -150,9 +152,19 @@ def run_pipeline_for_query(
         run_final_judgment(run_id=current_run_id, scoring_mode=scoring_mode)
 
         print("\n[6/6] Export Review Package")
-        export_review_package(limit=20, include_maybe=True, run_id=current_run_id)
+        exported_records = export_review_package(limit=20, include_maybe=True, run_id=current_run_id)
     finally:
         finish_pipeline_run(current_run_id)
+
+    return RunBatchExport(
+        run_id=current_run_id,
+        query=query,
+        niche=niche,
+        scoring_mode=scoring_mode,
+        inserted_new=discovery_counts["inserted"],
+        records=exported_records,
+        export_dir=run_export_directory(current_run_id),
+    )
 
 
 def main() -> None:
@@ -166,17 +178,30 @@ def main() -> None:
 
     print(f"Starting website refresh leads pipeline for {len(jobs)} quer{'y' if len(jobs) == 1 else 'ies'}...")
 
+    batch_run_exports: list[RunBatchExport] = []
+
     for index, (query, niche) in enumerate(jobs, start=1):
         print("\n" + "=" * 72)
         print(f"Pipeline {index}/{len(jobs)}")
         print("=" * 72)
-        run_pipeline_for_query(
+        run_export = run_pipeline_for_query(
             query=query,
             niche=niche,
             page_size=args.page_size,
             max_pages=args.max_pages,
             allow_revisit=args.allow_revisit,
             scoring_mode=args.scoring_mode,
+        )
+        if args.query_file:
+            batch_run_exports.append(run_export)
+
+    if args.query_file:
+        print("\n" + "=" * 72)
+        print("Batch Export")
+        print("=" * 72)
+        export_batch_review_package(
+            run_exports=batch_run_exports,
+            query_file=args.query_file,
         )
 
     print("\nPipeline run complete.")
