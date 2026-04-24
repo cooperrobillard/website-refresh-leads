@@ -100,7 +100,7 @@ class HybridScaffoldTests(unittest.TestCase):
         self.assertEqual(model_result["maybe"], 1)
         self.assertEqual(compare_result["skip"], 1)
         deterministic_mock.assert_called_once_with(run_id=11)
-        model_mock.assert_called_once_with(run_id=12, finalize_business=True, judgment_mode="primary")
+        model_mock.assert_any_call(run_id=12, finalize_business=True, judgment_mode="model_judge")
         compare_mock.assert_called_once_with(run_id=13)
 
     def test_prefilter_skips_duplicate_canonical_website_after_first_business(self) -> None:

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.crawl.page_selector import normalize_url, should_skip_link
 from app.db import SessionLocal
 from app.lead_selection import normalized_website_key
-from app.models import Artifact, Business, Note, Page, Score
+from app.models import Artifact, Business, ModelJudgment, Note, Page, PipelineRun, Score
 from app.pipeline_runs import resolve_pipeline_run
 
 
@@ -72,6 +72,19 @@ CSV_COLUMNS = [
     "quick_summary",
     "teardown_angle",
     "skip_reason",
+    "final_source",
+    "scoring_mode",
+    "model_name",
+    "prompt_version",
+    "response_id",
+    "evidence_quality",
+    "recommended_action",
+    "positive_signals",
+    "evidence_warnings",
+    "deterministic_fit_status",
+    "deterministic_total_score",
+    "deterministic_raw_total_score",
+    "deterministic_confidence",
 ]
 
 SCORE_DIMENSIONS = [
@@ -90,6 +103,24 @@ def parse_top_issues(raw_issues: str | None) -> list[str]:
     if not raw_issues:
         return []
     return [line.strip() for line in raw_issues.splitlines() if line.strip()]
+
+
+def parse_multiline_list(raw_text: str | None) -> list[str]:
+    """Split stored newline-delimited text into a clean list."""
+    if not raw_text:
+        return []
+    return [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+
+def recommended_action_from_fit_status(fit_status: str | None) -> str | None:
+    """Map a coarse fit status into an export-friendly recommended action."""
+    if fit_status == "strong":
+        return "review_for_outreach"
+    if fit_status == "maybe":
+        return "low_priority_review"
+    if fit_status == "skip":
+        return "skip"
+    return None
 
 
 def sanitize_page_url(page_type: str, url: str | None) -> str | None:
@@ -281,6 +312,16 @@ def build_review_record(
         "quick_summary": note.quick_summary if note else None,
         "teardown_angle": note.teardown_angle if note else None,
         "skip_reason": business.skip_reason,
+        "final_source": "deterministic",
+        "scoring_mode": "deterministic",
+        "model_name": None,
+        "prompt_version": None,
+        "response_id": None,
+        "evidence_quality": score.evidence_tier,
+        "recommended_action": recommended_action_from_fit_status(score.fit_status),
+        "positive_signals": [],
+        "evidence_warnings": [],
+        "deterministic_compare": None,
     }
 
 
@@ -430,6 +471,19 @@ def write_csv(records: list[dict[str, Any]], output_path: Path) -> None:
                     record["quick_summary"],
                     record["teardown_angle"],
                     record["skip_reason"],
+                    record.get("final_source"),
+                    record.get("scoring_mode"),
+                    record.get("model_name"),
+                    record.get("prompt_version"),
+                    record.get("response_id"),
+                    record.get("evidence_quality"),
+                    record.get("recommended_action"),
+                    " | ".join(record.get("positive_signals", [])),
+                    " | ".join(record.get("evidence_warnings", [])),
+                    (record.get("deterministic_compare") or {}).get("fit_status"),
+                    (record.get("deterministic_compare") or {}).get("total_score"),
+                    (record.get("deterministic_compare") or {}).get("raw_total_score"),
+                    (record.get("deterministic_compare") or {}).get("confidence"),
                 ]
             )
 
@@ -468,64 +522,280 @@ def dedupe_scored_rows(
     return deduped_rows, len(rows) - len(deduped_rows)
 
 
+def dedupe_model_rows(
+    rows: list[tuple[Business, ModelJudgment, Score | None]],
+) -> tuple[list[tuple[Business, ModelJudgment, Score | None]], int]:
+    """Keep one canonical model-judged row per normalized website key."""
+    grouped_rows: dict[str, list[tuple[Business, ModelJudgment, Score | None]]] = {}
+
+    for business, judgment, score in rows:
+        website_key = business.canonical_key or normalized_website_key(business.website) or f"business:{business.id}"
+        grouped_rows.setdefault(website_key, []).append((business, judgment, score))
+
+    deduped_rows: list[tuple[Business, ModelJudgment, Score | None]] = []
+    for row_group in grouped_rows.values():
+        canonical_row = max(
+            row_group,
+            key=lambda row: (
+                row[0].review_count or 0,
+                row[1].website_weakness or 0,
+                row[1].outreach_story_strength or 0,
+                -row[0].id,
+            ),
+        )
+        deduped_rows.append(canonical_row)
+
+    status_priority = {"strong": 0, "maybe": 1, "skip": 2}
+    confidence_priority = {"high": 0, "medium": 1, "low": 2}
+    deduped_rows.sort(
+        key=lambda row: (
+            status_priority.get(row[1].fit_status or "", 3),
+            confidence_priority.get(row[1].confidence or "", 3),
+            -(row[1].website_weakness or 0),
+            -(row[1].outreach_story_strength or 0),
+            -(row[0].review_count or 0),
+            row[0].name.lower(),
+        )
+    )
+
+    return deduped_rows, len(rows) - len(deduped_rows)
+
+
+def build_model_review_record(
+    *,
+    business: Business,
+    judgment: ModelJudgment,
+    page_map: dict[str, str | None],
+    artifact_map: dict[str, str],
+    current_run_id: int,
+    scoring_mode: str,
+    deterministic_score: Score | None = None,
+) -> dict[str, Any]:
+    """Build one exported review record from a stored model judgment."""
+    top_issues = parse_multiline_list(judgment.top_issues)
+    positive_signals = parse_multiline_list(judgment.positive_signals)
+    evidence_warnings = parse_multiline_list(judgment.evidence_warnings)
+    pages_captured = captured_page_count(page_map)
+    screenshots_captured = captured_screenshot_count(artifact_map)
+    deterministic_compare = None
+
+    if deterministic_score is not None:
+        deterministic_compare = {
+            "fit_status": deterministic_score.fit_status,
+            "total_score": deterministic_score.total_score,
+            "raw_total_score": deterministic_score.raw_total_score,
+            "confidence": deterministic_score.confidence,
+            "evidence_tier": deterministic_score.evidence_tier,
+        }
+
+    return {
+        "business_id": business.id,
+        "discovery_run_id": business.discovery_run_id,
+        "new_this_run": business.discovery_run_id == current_run_id,
+        "business_name": business.name,
+        "niche": business.niche,
+        "query_used": business.query_used,
+        "location": business.address,
+        "website": normalize_url(business.website) if business.website else None,
+        "canonical_url": normalize_url(business.canonical_url) if business.canonical_url else None,
+        "canonical_key": business.canonical_key,
+        "primary_type": business.primary_type,
+        "google_rating": business.rating,
+        "google_review_count": business.review_count,
+        "fit_status": judgment.fit_status,
+        "total_score": None,
+        "raw_total_score": None,
+        "confidence": judgment.confidence,
+        "evidence_tier": judgment.evidence_quality,
+        "evidence_cap": None,
+        "evidence_quality": judgment.evidence_quality,
+        "pages_captured": pages_captured,
+        "screenshots_captured": screenshots_captured,
+        "scores": {
+            "business_legitimacy": judgment.business_legitimacy,
+            "website_weakness": judgment.website_weakness,
+            "conversion_opportunity": None,
+            "trust_packaging": None,
+            "complexity_fit": None,
+            "outreach_viability": None,
+            "outreach_story_strength": judgment.outreach_story_strength,
+        },
+        "review_context": {
+            "why_it_qualified": judgment.short_reasoning,
+            "top_scoring_dimensions": [
+                {"dimension": "website_weakness", "score": judgment.website_weakness or 0},
+                {"dimension": "outreach_story_strength", "score": judgment.outreach_story_strength or 0},
+                {"dimension": "business_legitimacy", "score": judgment.business_legitimacy or 0},
+            ],
+            "evidence": {
+                "tier": judgment.evidence_quality,
+                "confidence": judgment.confidence,
+                "cap": None,
+                "raw_total_score": None,
+                "pages_captured": pages_captured,
+                "screenshots_captured": screenshots_captured,
+                "warnings": evidence_warnings,
+            },
+            "outreach_story": {
+                "strength_score": judgment.outreach_story_strength,
+                "assessment": outreach_story_assessment(judgment.outreach_story_strength),
+                "primary_gaps": top_issues[:2],
+            },
+            "model_judgment": {
+                "recommended_action": judgment.recommended_action,
+                "positive_signals": positive_signals,
+                "evidence_warnings": evidence_warnings,
+            },
+        },
+        "pages_found": {page_type: page_map.get(page_type) for page_type in PAGE_TYPES},
+        "screenshots": {
+            "homepage_desktop": artifact_map.get(ARTIFACT_TYPES["homepage_desktop"]),
+            "homepage_mobile": artifact_map.get(ARTIFACT_TYPES["homepage_mobile"]),
+        },
+        "top_issues": top_issues,
+        "quick_summary": judgment.short_reasoning,
+        "teardown_angle": judgment.short_teardown_angle,
+        "skip_reason": business.skip_reason if business.skip_reason else (judgment.short_reasoning if judgment.fit_status == "skip" else None),
+        "final_source": "model_judgment",
+        "scoring_mode": scoring_mode,
+        "model_name": judgment.model_name,
+        "prompt_version": judgment.prompt_version,
+        "response_id": judgment.response_id,
+        "recommended_action": judgment.recommended_action,
+        "positive_signals": positive_signals,
+        "evidence_warnings": evidence_warnings,
+        "deterministic_compare": deterministic_compare,
+    }
+
+
+def pipeline_run_scoring_mode(session: Session, run_id: int) -> str:
+    """Return the scoring mode recorded for one pipeline run."""
+    pipeline_run = session.get(PipelineRun, run_id)
+    if pipeline_run is None:
+        raise ValueError(f"Pipeline run not found: {run_id}")
+    return pipeline_run.scoring_mode
+
+
 def export_review_package(
     limit: int = 20,
     include_maybe: bool = True,
     fallback_to_skips: bool = True,
     run_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Export current-run new leads, plus maybe leads when requested, to JSON and CSV."""
-    status_order = case(
+    """Export current-run leads using the run's configured final judgment source."""
+    deterministic_status_order = case(
         (Score.fit_status == "strong", 0),
         (Score.fit_status == "maybe", 1),
+        else_=2,
+    )
+    model_status_order = case(
+        (ModelJudgment.fit_status == "strong", 0),
+        (ModelJudgment.fit_status == "maybe", 1),
         else_=2,
     )
 
     with SessionLocal() as session:
         current_run_id, _ = resolve_pipeline_run(session, run_id)
+        scoring_mode = pipeline_run_scoring_mode(session, current_run_id)
         export_dir, json_path, csv_path, screenshot_dir = run_export_paths(current_run_id)
         export_dir.mkdir(parents=True, exist_ok=True)
-        query = (
-            current_run_new_businesses_query(session, current_run_id)
-            .with_entities(Business, Score, Note)
-            .join(Score, Score.business_id == Business.id)
-            .outerjoin(Note, Note.business_id == Business.id)
-        )
 
-        if include_maybe:
-            query = query.filter(Score.fit_status.in_(["strong", "maybe"]))
-        else:
-            query = query.filter(Score.fit_status == "strong")
+        records: list[dict[str, Any]]
+        duplicate_count = 0
 
-        rows = (
-            query.order_by(
-                status_order,
-                Score.total_score.desc(),
-                Business.review_count.desc(),
-                Business.name.asc(),
-            )
-            .all()
-        )
-        rows, duplicate_count = dedupe_scored_rows(rows)
-        rows = rows[:limit]
-
-        if not rows and fallback_to_skips:
-            fallback_rows = (
+        if scoring_mode == "deterministic":
+            query = (
                 current_run_new_businesses_query(session, current_run_id)
                 .with_entities(Business, Score, Note)
                 .join(Score, Score.business_id == Business.id)
                 .outerjoin(Note, Note.business_id == Business.id)
-                .filter(Score.fit_status == "skip")
-                .order_by(Score.total_score.desc(), Business.review_count.desc(), Business.name.asc())
+            )
+
+            if include_maybe:
+                query = query.filter(Score.fit_status.in_(["strong", "maybe"]))
+            else:
+                query = query.filter(Score.fit_status == "strong")
+
+            rows = (
+                query.order_by(
+                    deterministic_status_order,
+                    Score.total_score.desc(),
+                    Business.review_count.desc(),
+                    Business.name.asc(),
+                )
                 .all()
             )
-            fallback_rows, fallback_duplicate_count = dedupe_scored_rows(fallback_rows)
-            rows = fallback_rows[:limit]
-            duplicate_count += fallback_duplicate_count
-            if rows:
-                print("No current-run strong/maybe leads found. Exporting current-run skip leads as fallback.")
+            rows, duplicate_count = dedupe_scored_rows(rows)
+            rows = rows[:limit]
 
-        business_ids = [business.id for business, _, _ in rows]
+            if not rows and fallback_to_skips:
+                fallback_rows = (
+                    current_run_new_businesses_query(session, current_run_id)
+                    .with_entities(Business, Score, Note)
+                    .join(Score, Score.business_id == Business.id)
+                    .outerjoin(Note, Note.business_id == Business.id)
+                    .filter(Score.fit_status == "skip")
+                    .order_by(Score.total_score.desc(), Business.review_count.desc(), Business.name.asc())
+                    .all()
+                )
+                fallback_rows, fallback_duplicate_count = dedupe_scored_rows(fallback_rows)
+                rows = fallback_rows[:limit]
+                duplicate_count += fallback_duplicate_count
+                if rows:
+                    print("No current-run strong/maybe leads found. Exporting current-run skip leads as fallback.")
+
+            business_ids = [business.id for business, _, _ in rows]
+        else:
+            query = (
+                current_run_new_businesses_query(session, current_run_id)
+                .with_entities(Business, ModelJudgment, Score)
+                .join(ModelJudgment, ModelJudgment.business_id == Business.id)
+                .outerjoin(Score, Score.business_id == Business.id)
+                .filter(ModelJudgment.pipeline_run_id == current_run_id)
+                .filter(ModelJudgment.judgment_mode == scoring_mode)
+            )
+
+            if include_maybe:
+                query = query.filter(ModelJudgment.fit_status.in_(["strong", "maybe"]))
+            else:
+                query = query.filter(ModelJudgment.fit_status == "strong")
+
+            rows = (
+                query.order_by(
+                    model_status_order,
+                    ModelJudgment.website_weakness.desc(),
+                    ModelJudgment.outreach_story_strength.desc(),
+                    Business.review_count.desc(),
+                    Business.name.asc(),
+                )
+                .all()
+            )
+            rows, duplicate_count = dedupe_model_rows(rows)
+            rows = rows[:limit]
+
+            if not rows and fallback_to_skips:
+                fallback_rows = (
+                    current_run_new_businesses_query(session, current_run_id)
+                    .with_entities(Business, ModelJudgment, Score)
+                    .join(ModelJudgment, ModelJudgment.business_id == Business.id)
+                    .outerjoin(Score, Score.business_id == Business.id)
+                    .filter(ModelJudgment.pipeline_run_id == current_run_id)
+                    .filter(ModelJudgment.judgment_mode == scoring_mode)
+                    .filter(ModelJudgment.fit_status == "skip")
+                    .order_by(
+                        ModelJudgment.confidence.asc(),
+                        Business.review_count.desc(),
+                        Business.name.asc(),
+                    )
+                    .all()
+                )
+                fallback_rows, fallback_duplicate_count = dedupe_model_rows(fallback_rows)
+                rows = fallback_rows[:limit]
+                duplicate_count += fallback_duplicate_count
+                if rows:
+                    print("No current-run strong/maybe model judgments found. Exporting current-run skip leads as fallback.")
+
+            business_ids = [business.id for business, _, _ in rows]
 
         page_rows = (
             session.query(Page)
@@ -543,17 +813,31 @@ def export_review_package(
         page_maps = build_page_maps(page_rows)
         artifact_maps = build_artifact_maps(artifact_rows)
 
-        records = [
-            build_review_record(
-                business=business,
-                score=score,
-                note=note,
-                page_map=page_maps.get(business.id, {}),
-                artifact_map=artifact_maps.get(business.id, {}),
-                current_run_id=current_run_id,
-            )
-            for business, score, note in rows
-        ]
+        if scoring_mode == "deterministic":
+            records = [
+                build_review_record(
+                    business=business,
+                    score=score,
+                    note=note,
+                    page_map=page_maps.get(business.id, {}),
+                    artifact_map=artifact_maps.get(business.id, {}),
+                    current_run_id=current_run_id,
+                )
+                for business, score, note in rows
+            ]
+        else:
+            records = [
+                build_model_review_record(
+                    business=business,
+                    judgment=judgment,
+                    page_map=page_maps.get(business.id, {}),
+                    artifact_map=artifact_maps.get(business.id, {}),
+                    current_run_id=current_run_id,
+                    scoring_mode=scoring_mode,
+                    deterministic_score=score,
+                )
+                for business, judgment, score in rows
+            ]
         copied_screenshot_count = collect_export_screenshots(records, screenshot_dir)
 
         json_path.write_text(json.dumps(records, indent=2), encoding="utf-8")
@@ -564,6 +848,7 @@ def export_review_package(
         maybe_count = sum(1 for record in records if record["fit_status"] == "maybe")
 
         print(f"Run {current_run_id}: exporting current-run new candidates only")
+        print(f"Scoring mode: {scoring_mode}")
         print(f"Exported {len(records)} leads")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")

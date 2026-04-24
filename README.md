@@ -4,7 +4,7 @@
 
 ## V1 Goal
 
-Build a lightweight local pipeline that can surface potential leads, gather site evidence, run a preserved deterministic path or a scaffolded model-judge path, and export a compact review package for manual outreach review.
+Build a lightweight local pipeline that can surface potential leads, gather site evidence, run a preserved deterministic path or an OpenAI-powered model-judge path, and export a compact review package for manual outreach review.
 
 ## Current Status
 
@@ -15,7 +15,8 @@ The architecture is now preservation-first hybrid:
 - deterministic prefiltering remains the lightweight admission gate
 - deterministic rubric scoring is preserved and still runnable
 - `model_judge` is the new default scoring mode and intended primary direction
-- the current model-judge path is scaffolded locally and falls back to the preserved deterministic rubric until a live client is added
+- `model_judge` now uses the OpenAI Responses API with compact multimodal evidence and strict structured output
+- `compare` mode preserves deterministic scoring while exporting model judgment as the primary review output
 
 Canonical website memory is now durable across runs. By default, if a canonical website was surfaced in any prior run, future runs skip it even when the prior lead was weak or only partially evidenced.
 
@@ -35,7 +36,7 @@ The deterministic rubric still uses the evidence the repo already collects. If c
 1. Create and activate a virtual environment.
 2. Install dependencies.
 3. Install Playwright browsers.
-4. Copy `.env.example` to `.env` and fill in your Places API key.
+4. Copy `.env.example` to `.env` and fill in your Places API key and local OpenAI key.
 
 ```bash
 python3 -m venv .venv
@@ -65,6 +66,13 @@ The project reads configuration from `.env` via `python-dotenv`. The main databa
 DATABASE_URL=sqlite:///data/leads.db
 ```
 
+OpenAI model judging is configured the same way:
+
+```bash
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5.4-mini
+```
+
 ## Single-Query Usage
 
 Run the full pipeline for one query:
@@ -78,6 +86,12 @@ The main runner now supports:
 - `--scoring-mode model_judge` (default)
 - `--scoring-mode deterministic`
 - `--scoring-mode compare`
+
+Mode behavior:
+
+- `model_judge`: uses GPT-5.4 mini through the Responses API and exports `ModelJudgment` rows as the primary review package
+- `deterministic`: preserves the old deterministic scoring and export path
+- `compare`: runs deterministic scoring plus model judging, then exports model judgment with deterministic comparison fields
 
 Optional discovery controls:
 
@@ -143,9 +157,11 @@ The review package includes current-run new candidates only. Within that scope i
 
 - business info and review counts
 - run/debug fields such as `query_used`, canonical URL/key, and `discovery_run_id`
-- final `fit_status`, capped score, raw score, evidence tier/cap, and confidence
-- per-dimension score breakdown
-- compact review context for manual ranking: why it qualified, top scoring dimensions, evidence strength, and outreach-story strength
+- final `fit_status`, confidence, evidence quality, and recommended action
+- model-judgment fields such as website weakness, outreach-story strength, positive signals, and evidence warnings
+- deterministic comparison fields when the run used `--scoring-mode compare`
+- per-dimension score breakdown when the run used deterministic scoring
+- compact review context for manual ranking: why it qualified, evidence strength, and outreach-story strength
 - selected page URLs
 - screenshot paths
 - top issues, quick summary, teardown angle, and skip reason

@@ -46,6 +46,7 @@ def upsert_model_judgment(
     row.top_issues = "\n".join(outcome.top_issues) if outcome.top_issues else None
     row.short_teardown_angle = outcome.short_teardown_angle
     row.short_reasoning = outcome.short_reasoning
+    row.evidence_warnings = "\n".join(outcome.evidence_warnings) if outcome.evidence_warnings else None
+    row.positive_signals = "\n".join(outcome.positive_signals) if outcome.positive_signals else None
     row.raw_json = json.dumps(outcome.raw_json, indent=2) if outcome.raw_json else None
     return row
-

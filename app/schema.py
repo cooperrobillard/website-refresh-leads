@@ -45,6 +45,11 @@ SCORE_COLUMN_STATEMENTS = {
     "evidence_cap": "ALTER TABLE scores ADD COLUMN evidence_cap INTEGER",
 }
 
+MODEL_JUDGMENT_COLUMN_STATEMENTS = {
+    "evidence_warnings": "ALTER TABLE model_judgments ADD COLUMN evidence_warnings TEXT",
+    "positive_signals": "ALTER TABLE model_judgments ADD COLUMN positive_signals TEXT",
+}
+
 
 def _is_sqlite_database() -> bool:
     """Return True when the configured database is a local SQLite file."""
@@ -122,6 +127,18 @@ def _ensure_sqlite_score_columns() -> None:
 
         existing_columns = _column_names(connection, "scores")
         for column_name, statement in SCORE_COLUMN_STATEMENTS.items():
+            if column_name not in existing_columns:
+                connection.execute(text(statement))
+
+
+def _ensure_sqlite_model_judgment_columns() -> None:
+    """Add missing SQLite model judgment columns for lightweight schema upgrades."""
+    with engine.begin() as connection:
+        if not _table_exists(connection, "model_judgments"):
+            return
+
+        existing_columns = _column_names(connection, "model_judgments")
+        for column_name, statement in MODEL_JUDGMENT_COLUMN_STATEMENTS.items():
             if column_name not in existing_columns:
                 connection.execute(text(statement))
 
@@ -286,6 +303,7 @@ def ensure_database_schema() -> None:
     _ensure_sqlite_business_columns()
     _ensure_sqlite_pipeline_run_columns()
     _ensure_sqlite_score_columns()
+    _ensure_sqlite_model_judgment_columns()
     backfill_result = _backfill_existing_businesses()
     pipeline_run_backfill_count = _backfill_existing_pipeline_runs()
     score_backfill_count = _backfill_existing_scores()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from collections import Counter
 
 from sqlalchemy import case
@@ -11,13 +10,12 @@ from app.db import SessionLocal
 from app.judging.client import ModelJudgeClient
 from app.judging.package_builder import build_business_judging_package, post_browser_evidence_gate
 from app.judging.persistence import upsert_model_judgment
-from app.judging.prompting import PROMPT_VERSION, build_prompt
-from app.judging.schemas import BusinessJudgingPackage, ModelJudgeOutcome
+from app.judging.prompting import build_prompt
+from app.judging.schemas import ModelJudgeOutcome
 from app.lead_selection import dedupe_businesses_by_website, normalized_website_key
-from app.models import Business, Score
+from app.models import Business
 from app.pipeline_runs import businesses_for_run_query, resolve_pipeline_run
 from app.scoring.deterministic.runner import run_deterministic_scoring
-from app.scoring.deterministic.rubric import ScoringResult, evaluate_business, upsert_score_and_note
 
 
 def _prefilter_status_order():
@@ -31,106 +29,50 @@ def _prefilter_status_order():
 
 def _zero_duplicate_score(session, business: Business, canonical_name: str) -> None:
     """Persist an explicit duplicate skip so downstream exports stay deterministic."""
-    _upsert_hard_skip(
-        session,
+    _apply_business_judgment(
         business,
-        f"Duplicate website of canonical business: {canonical_name}",
+        fit_status="skip",
+        skip_reason=f"Duplicate website of canonical business: {canonical_name}",
     )
 
 
-def _upsert_hard_skip(session, business: Business, reason: str) -> None:
-    """Persist a zeroed-out skip result for hard-stop cases."""
-    business.fit_status = "skip"
-    business.skip_reason = reason
-
-    score_row = session.query(Score).filter(Score.business_id == business.id).first()
-    if score_row is None:
-        score_row = Score(business_id=business.id)
-        session.add(score_row)
-
-    score_row.business_legitimacy = 0
-    score_row.website_weakness = 0
-    score_row.conversion_opportunity = 0
-    score_row.trust_packaging = 0
-    score_row.complexity_fit = 0
-    score_row.outreach_viability = 0
-    score_row.outreach_story_strength = 0
-    score_row.raw_total_score = 0
-    score_row.evidence_tier = "minimal"
-    score_row.evidence_cap = 0
-    score_row.total_score = 0
-    score_row.fit_status = "skip"
-    score_row.confidence = "low"
-
-
-def _label_strength(score_value: int | None) -> str:
-    """Map deterministic numeric sub-scores into compact qualitative labels."""
-    value = score_value or 0
-    if value >= 10:
-        return "high"
-    if value >= 5:
-        return "medium"
-    if value >= 1:
-        return "low"
-    return "minimal"
-
-
-def _fallback_outcome_from_deterministic(
+def _apply_business_judgment(
+    business: Business,
     *,
-    package: BusinessJudgingPackage,
-    result: ScoringResult,
-    judgment_mode: str,
-) -> ModelJudgeOutcome:
-    """Translate deterministic rubric output into a temporary model-judgment record."""
-    return ModelJudgeOutcome(
-        model_name="deterministic-fallback",
-        prompt_version=PROMPT_VERSION,
-        response_id=None,
-        judgment_mode=judgment_mode,
-        fit_status=result.fit_status,
-        confidence=result.confidence,
-        evidence_quality=result.evidence_tier,
-        business_legitimacy=_label_strength(result.scores.get("business_legitimacy")),
-        website_weakness=_label_strength(result.scores.get("website_weakness")),
-        outreach_story_strength=_label_strength(result.scores.get("outreach_story_strength")),
-        recommended_action="review_now" if result.fit_status in {"strong", "maybe"} else "skip",
-        top_issues=result.top_issues[:3],
-        short_teardown_angle=result.teardown_angle,
-        short_reasoning=result.quick_summary,
-        raw_json={
-            "source": "deterministic_fallback",
-            "judging_package": asdict(package),
-            "fallback_reason": "No live model client configured",
-        },
-    )
+    fit_status: str,
+    skip_reason: str | None = None,
+) -> None:
+    """Update the business row to reflect the currently selected final judgment path."""
+    business.fit_status = fit_status
+    business.skip_reason = skip_reason if fit_status == "skip" else None
 
 
 def _evidence_gate_outcome(
     *,
-    package: BusinessJudgingPackage,
     judgment_mode: str,
     reason: str,
 ) -> ModelJudgeOutcome:
     """Build a stored judgment row for late hard-stop evidence failures."""
     return ModelJudgeOutcome(
         model_name="evidence-gate",
-        prompt_version=PROMPT_VERSION,
+        prompt_version="evidence_gate_v1",
         response_id=None,
         judgment_mode=judgment_mode,
         fit_status="skip",
         confidence="high",
         evidence_quality="minimal",
-        business_legitimacy="unknown",
-        website_weakness="unknown",
-        outreach_story_strength="unknown",
+        business_legitimacy=0,
+        website_weakness=0,
+        outreach_story_strength=0,
         recommended_action="skip",
         top_issues=[reason],
         short_teardown_angle="Do not send to the model until evidence collection succeeds.",
         short_reasoning=reason,
+        evidence_warnings=[reason],
+        positive_signals=[],
         raw_json={
             "source": "evidence_gate",
             "reason": reason,
-            "judging_package": asdict(package),
         },
     )
 
@@ -139,9 +81,9 @@ def run_model_judging(
     run_id: int | None = None,
     *,
     finalize_business: bool = True,
-    judgment_mode: str = "primary",
+    judgment_mode: str = "model_judge",
 ) -> Counter[str]:
-    """Run the scaffolded model-judge path with deterministic fallback output."""
+    """Run the OpenAI-backed model-judge path across evidence-ready businesses."""
     client = ModelJudgeClient()
 
     with SessionLocal() as session:
@@ -159,7 +101,7 @@ def run_model_judging(
             for business in businesses
         }
 
-        label = "model-judge" if judgment_mode == "primary" else f"model-judge ({judgment_mode})"
+        label = "model-judge" if judgment_mode == "model_judge" else f"model-judge ({judgment_mode})"
         print(f"Run {current_run_id}: {label} processing {len(businesses)} businesses")
         if duplicate_count:
             print(f"Skipped {duplicate_count} duplicate website entr{'y' if duplicate_count == 1 else 'ies'}")
@@ -186,7 +128,6 @@ def run_model_judging(
             evidence_gate_reason = post_browser_evidence_gate(package)
             if evidence_gate_reason:
                 outcome = _evidence_gate_outcome(
-                    package=package,
                     judgment_mode=judgment_mode,
                     reason=evidence_gate_reason,
                 )
@@ -197,7 +138,11 @@ def run_model_judging(
                     outcome=outcome,
                 )
                 if finalize_business:
-                    _upsert_hard_skip(session, business, evidence_gate_reason)
+                    _apply_business_judgment(
+                        business,
+                        fit_status="skip",
+                        skip_reason=evidence_gate_reason,
+                    )
                 counts["skip"] += 1
                 print(
                     f"{business.name} | "
@@ -209,16 +154,6 @@ def run_model_judging(
 
             prompt = build_prompt(package)
             outcome = client.judge(package, prompt, judgment_mode=judgment_mode)
-            deterministic_result = evaluate_business(session, business)
-
-            if outcome is None:
-                # Keep the new judgment path runnable before a live model client lands.
-                outcome = _fallback_outcome_from_deterministic(
-                    package=package,
-                    result=deterministic_result,
-                    judgment_mode=judgment_mode,
-                )
-
             upsert_model_judgment(
                 session,
                 business_id=business.id,
@@ -227,14 +162,27 @@ def run_model_judging(
             )
 
             if finalize_business:
-                upsert_score_and_note(session, business, deterministic_result)
+                skip_reason = None
+                if outcome.fit_status == "skip":
+                    skip_reason = (
+                        outcome.top_issues[0]
+                        if outcome.top_issues
+                        else outcome.short_reasoning or "Model judgment marked this lead as skip."
+                    )
+                _apply_business_judgment(
+                    business,
+                    fit_status=outcome.fit_status,
+                    skip_reason=skip_reason,
+                )
 
-            counts[deterministic_result.fit_status] += 1
+            counts[outcome.fit_status] += 1
             print(
                 f"{business.name} | "
-                f"prefilter={business.prefilter_status} | "
-                f"final={deterministic_result.fit_status} | "
-                f"source={outcome.model_name}"
+                f"fit={outcome.fit_status} | "
+                f"confidence={outcome.confidence} | "
+                f"evidence={outcome.evidence_quality} | "
+                f"weakness={outcome.website_weakness}/10 | "
+                f"story={outcome.outreach_story_strength}/10"
             )
 
         session.commit()
@@ -247,11 +195,10 @@ def run_model_judging(
 
 
 def run_compare_mode(run_id: int | None = None) -> Counter[str]:
-    """Run deterministic scoring for exports, then persist shadow model judgments."""
-    print("Compare mode: deterministic scoring remains authoritative for exports.")
-    counts = run_deterministic_scoring(run_id=run_id)
-    run_model_judging(run_id=run_id, finalize_business=False, judgment_mode="shadow")
-    return counts
+    """Run deterministic scoring and model judging in one compare-mode pass."""
+    print("Compare mode: deterministic scoring is preserved, but model judgment remains primary for export.")
+    run_deterministic_scoring(run_id=run_id)
+    return run_model_judging(run_id=run_id, finalize_business=True, judgment_mode="compare")
 
 
 def run_final_judgment(run_id: int | None = None, *, scoring_mode: str = "model_judge") -> Counter[str]:
@@ -260,4 +207,4 @@ def run_final_judgment(run_id: int | None = None, *, scoring_mode: str = "model_
         return run_deterministic_scoring(run_id=run_id)
     if scoring_mode == "compare":
         return run_compare_mode(run_id=run_id)
-    return run_model_judging(run_id=run_id, finalize_business=True, judgment_mode="primary")
+    return run_model_judging(run_id=run_id, finalize_business=True, judgment_mode="model_judge")
